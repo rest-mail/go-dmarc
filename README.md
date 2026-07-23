@@ -1,7 +1,7 @@
 # dmarc
 
-[![CI](https://github.com/rest-mail/dmarc/actions/workflows/ci.yml/badge.svg)](https://github.com/rest-mail/dmarc/actions/workflows/ci.yml)
-[![Go Reference](https://pkg.go.dev/badge/github.com/rest-mail/dmarc.svg)](https://pkg.go.dev/github.com/rest-mail/dmarc)
+[![CI](https://github.com/rest-mail/go-dmarc/actions/workflows/ci.yml/badge.svg)](https://github.com/rest-mail/go-dmarc/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/rest-mail/go-dmarc.svg)](https://pkg.go.dev/github.com/rest-mail/go-dmarc)
 
 The receiver side of DMARC ([RFC 7489](https://www.rfc-editor.org/rfc/rfc7489))
 for Go, with zero external dependencies (standard library only): policy lookup
@@ -25,7 +25,7 @@ likes; a reporter later hands a slice of neutral `AggregateRecord` values to
 ## Install
 
 ```sh
-go get github.com/rest-mail/dmarc
+go get github.com/rest-mail/go-dmarc
 ```
 
 ## Evaluate a message
