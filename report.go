@@ -1,13 +1,41 @@
 // Package dmarc implements the receiver side of DMARC (RFC 7489): looking up and
 // parsing a domain's published policy, evaluating identifier alignment, and
-// generating aggregate (rua) report XML.
+// generating aggregate (rua) report XML. It depends only on the Go standard
+// library.
+//
+// DMARC (Domain-based Message Authentication, Reporting, and Conformance) lets
+// the owner of a From domain publish, at _dmarc.<domain>, how receivers should
+// treat mail that is not authenticated as coming from that domain. A receiver
+// checks whether a passing SPF or DKIM identifier aligns with the From domain;
+// if neither does, it applies the domain's published policy (none, quarantine,
+// or reject) and, later, reports what it saw back to the domain owner.
 //
 // The package is deliberately free of any storage or scheduling concerns. A
 // caller records per-message evaluations however it likes, then hands a slice of
 // neutral [AggregateRecord] values to [BuildReport] to produce the RFC 7489
-// aggregate-report document. Policy discovery ([Lookup], [ParsePolicy]) and
-// alignment ([Aligned]) are exposed as standalone primitives so a mail pipeline
-// can consult them per message.
+// aggregate-report document.
+//
+// # Policy discovery and evaluation
+//
+// [Lookup] fetches the raw DMARC record at _dmarc.<domain> (pass nil for the
+// resolver to use system DNS), and [ParsePolicy] reads its requested policy from
+// the p= tag. [Aligned] reports whether an authenticated domain — from an SPF
+// smtp.mailfrom or a verified DKIM signature's d= — aligns with the From domain:
+//
+//	record, _ := dmarc.Lookup("example.com", nil)
+//	policy := dmarc.ParsePolicy(record) // "none" | "quarantine" | "reject"
+//	if !dmarc.Aligned(authDomain, "example.com") && policy == "reject" {
+//		// no aligned identifier passed: reject per published policy
+//	}
+//
+// # Aggregate reporting
+//
+// A reporter collects one [AggregateRecord] per evaluated message, then calls
+// [BuildReport] to marshal them into the RFC 7489 aggregate-report XML document.
+// [AggregateRecords] performs the grouping (identical rows are summed into a
+// count) and is called by [BuildReport], but is exported for callers that want
+// the grouped rows directly. [Gzip] compresses the document for delivery as the
+// application/gzip attachment RFC 7489 §7.2.1 specifies.
 package dmarc
 
 import (
