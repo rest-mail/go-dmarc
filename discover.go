@@ -71,12 +71,20 @@ func DefaultOrgDomain(domain string) string {
 // returned; a domain that simply publishes no policy is reported as a zero
 // [Policy] with a nil error.
 func Discover(domain string, resolver TXTResolver, orgDomain OrgDomainFunc) (Policy, error) {
-	// Step: query the DMARC record at the exact From domain.
-	record, err := Lookup(domain, resolver)
+	// §6.6.3 steps 1-2: query the exact From domain and keep only v=DMARC1 records.
+	records, err := lookupDMARC(domain, resolver)
 	if err != nil {
 		return Policy{}, err
 	}
-	if record != "" {
+	// §6.6.3 step 5: more than one v=DMARC1 record is an ambiguous set that is
+	// discarded, and discovery terminates with no policy. The set is non-empty,
+	// so step 3's org-domain fallback (which runs only on an empty set) does not
+	// apply — we must not fall back and adopt the org domain's policy.
+	if len(records) > 1 {
+		return Policy{Requested: "none"}, nil
+	}
+	if len(records) == 1 {
+		record := records[0]
 		pct, err := ParsePct(record)
 		if err != nil {
 			return Policy{}, err
@@ -84,8 +92,8 @@ func Discover(domain string, resolver TXTResolver, orgDomain OrgDomainFunc) (Pol
 		return Policy{Domain: domain, Record: record, Requested: ParsePolicy(record), Pct: pct}, nil
 	}
 
-	// §6.6.3: the exact-domain set is empty, so fall back to the record at the
-	// Organizational Domain (unless the domain already is its own org domain).
+	// §6.6.3 step 3: the exact-domain set is empty, so fall back to the record at
+	// the Organizational Domain (unless the domain already is its own org domain).
 	if orgDomain == nil {
 		orgDomain = DefaultOrgDomain
 	}
@@ -94,13 +102,16 @@ func Discover(domain string, resolver TXTResolver, orgDomain OrgDomainFunc) (Pol
 		return Policy{Requested: "none"}, nil
 	}
 
-	orgRecord, err := Lookup(org, resolver)
+	orgRecords, err := lookupDMARC(org, resolver)
 	if err != nil {
 		return Policy{}, err
 	}
-	if orgRecord == "" {
+	// Step 5 again for the org-domain set: no record, or an ambiguous multi-record
+	// set that is discarded, both leave the subdomain with no policy.
+	if len(orgRecords) != 1 {
 		return Policy{Requested: "none"}, nil
 	}
+	orgRecord := orgRecords[0]
 	pct, err := ParsePct(orgRecord)
 	if err != nil {
 		return Policy{}, err

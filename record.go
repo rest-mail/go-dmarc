@@ -17,9 +17,11 @@ type TXTResolver func(name string) ([]string, error)
 // _dmarc.<domain>. It maps DNS outcomes to the three RFC 7489 §6.6.3 cases:
 //
 //   - Record found: the raw "v=DMARC1..." TXT record and a nil error.
-//   - No DMARC policy: ("", nil). This covers both a name that exists but
-//     carries no v=DMARC1 record and a name that does not exist at all — a
-//     not-found (NXDOMAIN) result is "DMARC does not apply", not a failure.
+//   - No DMARC policy: ("", nil). This covers a name that carries no v=DMARC1
+//     record, a name that does not exist at all (a not-found/NXDOMAIN result is
+//     "DMARC does not apply", not a failure), and a name that carries more than
+//     one v=DMARC1 record — an ambiguous set §6.6.3 discards, so it too is "no
+//     policy" rather than a non-deterministic first-wins guess.
 //   - Transient failure (SERVFAIL, timeout, and other non-not-found DNS
 //     errors): ("", err). Callers must treat this as temperror and not fail
 //     open — the domain's policy is unknown, not absent.
@@ -28,6 +30,28 @@ type TXTResolver func(name string) ([]string, error)
 // *net.DNSError whose IsNotFound is set, which is what [net.LookupTXT] does;
 // fakes returning such an error are classified the same way.
 func Lookup(domain string, resolver TXTResolver) (string, error) {
+	records, err := lookupDMARC(domain, resolver)
+	if err != nil {
+		return "", err
+	}
+	// RFC 7489 §6.6.3 step 5: exactly one v=DMARC1 record is a usable policy.
+	// Zero records, or more than one (an ambiguous set that is discarded), both
+	// mean the domain has no applicable policy.
+	if len(records) != 1 {
+		return "", nil
+	}
+	return records[0], nil
+}
+
+// lookupDMARC queries _dmarc.<domain> and returns the TXT records at that name
+// that begin with the v=DMARC1 tag — the RFC 7489 §6.6.3 filtering that discards
+// non-DMARC TXT records (SPF, verification tokens, and the like). A nil resolver
+// falls back to [net.LookupTXT]. It applies Lookup's error contract: a not-found
+// (NXDOMAIN) result maps to an empty set with a nil error, while other resolver
+// errors surface unchanged so callers can treat them as temperror. Returning the
+// full filtered set (rather than the first match) lets callers distinguish the
+// no-record, single-record, and ambiguous multi-record cases.
+func lookupDMARC(domain string, resolver TXTResolver) ([]string, error) {
 	if resolver == nil {
 		resolver = net.LookupTXT
 	}
@@ -38,16 +62,17 @@ func Lookup(domain string, resolver TXTResolver) (string, error) {
 		// genuine transient errors surface to the caller.
 		var dnsErr *net.DNSError
 		if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
-			return "", nil
+			return nil, nil
 		}
-		return "", err
+		return nil, err
 	}
+	var dmarc []string
 	for _, r := range records {
 		if strings.HasPrefix(r, "v=DMARC1") {
-			return r, nil
+			dmarc = append(dmarc, r)
 		}
 	}
-	return "", nil
+	return dmarc, nil
 }
 
 // ParsePolicy extracts the requested policy (the p= tag) from a DMARC record.

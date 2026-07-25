@@ -150,6 +150,49 @@ func TestDiscover(t *testing.T) {
 		}
 	})
 
+	// Issue #12: RFC 7489 §6.6.3 step 5 — a name publishing more than one
+	// v=DMARC1 record has an ambiguous set that is discarded, and discovery
+	// terminates with no policy. Because the queried set is non-empty (step 3
+	// only falls back to the organizational domain on an *empty* set), this must
+	// NOT fall back, even when the org domain publishes a usable policy.
+	t.Run("multiple records at the queried domain yield no policy without falling back", func(t *testing.T) {
+		resolver := func(name string) ([]string, error) {
+			switch name {
+			case "_dmarc.sub.example.test":
+				return []string{"v=DMARC1; p=reject", "v=DMARC1; p=none"}, nil
+			case "_dmarc.example.test":
+				return []string{"v=DMARC1; p=reject; sp=quarantine"}, nil
+			default:
+				return nil, nil
+			}
+		}
+		p, err := Discover("sub.example.test", resolver, nil)
+		if err != nil {
+			t.Fatalf("ambiguous multi-record set is no-policy, not an error: %v", err)
+		}
+		if p.Record != "" || p.ViaOrgDomain || p.Requested != "none" {
+			t.Errorf("got %+v, want empty record / Requested=none / no org fallback", p)
+		}
+	})
+
+	// Multiple records at the organizational domain reached through the fallback
+	// are likewise discarded: the subdomain ends up with no policy.
+	t.Run("multiple records at the org domain yield no policy", func(t *testing.T) {
+		resolver := func(name string) ([]string, error) {
+			if name == "_dmarc.example.test" {
+				return []string{"v=DMARC1; p=reject; sp=quarantine", "v=DMARC1; p=none"}, nil
+			}
+			return nil, nil // the subdomain itself publishes nothing
+		}
+		p, err := Discover("sub.example.test", resolver, nil)
+		if err != nil {
+			t.Fatalf("ambiguous org-domain set is no-policy, not an error: %v", err)
+		}
+		if p.Record != "" || p.ViaOrgDomain || p.Requested != "none" {
+			t.Errorf("got %+v, want empty record / Requested=none", p)
+		}
+	})
+
 	t.Run("resolver error propagates", func(t *testing.T) {
 		wantErr := errors.New("dns timeout")
 		resolver := func(string) ([]string, error) { return nil, wantErr }
