@@ -64,8 +64,11 @@ func Example_aggregateReport() {
 			SourceIP:    "192.0.2.10",
 			HeaderFrom:  "example.com",
 			Disposition: "reject",
-			SPFResult:   "pass",
-			SPFAligned:  false,
+			// SPF passed for the envelope-sender (bounce) domain, which does not
+			// align with the From domain; auth_results reports that checked domain.
+			SPF: []dmarc.SPFAuth{
+				{Domain: "bounce.marketing.net", Scope: "mfrom", Result: "pass", Aligned: false},
+			},
 		},
 	}
 	meta := dmarc.ReportMetadata{

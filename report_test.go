@@ -10,9 +10,15 @@ import (
 
 func TestAggregateRecords_GroupsAndCounts(t *testing.T) {
 	recs := []AggregateRecord{
-		{Domain: "example.test", SourceIP: "10.0.0.1", HeaderFrom: "a@example.test", Disposition: "none", DKIMResult: "pass", DKIMAligned: true, SPFResult: "pass", SPFAligned: true},
-		{Domain: "example.test", SourceIP: "10.0.0.1", HeaderFrom: "a@example.test", Disposition: "none", DKIMResult: "pass", DKIMAligned: true, SPFResult: "pass", SPFAligned: true},
-		{Domain: "example.test", SourceIP: "10.0.0.2", HeaderFrom: "a@example.test", Disposition: "reject", DKIMResult: "fail", DKIMAligned: false, SPFResult: "fail", SPFAligned: false},
+		{Domain: "example.test", SourceIP: "10.0.0.1", HeaderFrom: "a@example.test", Disposition: "none",
+			DKIM: []DKIMAuth{{Domain: "example.test", Selector: "s1", Result: "pass", Aligned: true}},
+			SPF:  []SPFAuth{{Domain: "example.test", Scope: "mfrom", Result: "pass", Aligned: true}}},
+		{Domain: "example.test", SourceIP: "10.0.0.1", HeaderFrom: "a@example.test", Disposition: "none",
+			DKIM: []DKIMAuth{{Domain: "example.test", Selector: "s1", Result: "pass", Aligned: true}},
+			SPF:  []SPFAuth{{Domain: "example.test", Scope: "mfrom", Result: "pass", Aligned: true}}},
+		{Domain: "example.test", SourceIP: "10.0.0.2", HeaderFrom: "a@example.test", Disposition: "reject",
+			DKIM: []DKIMAuth{{Domain: "evil.test", Selector: "s9", Result: "fail", Aligned: false}},
+			SPF:  []SPFAuth{{Domain: "bounce.evil.test", Scope: "mfrom", Result: "fail", Aligned: false}}},
 	}
 	rows := AggregateRecords(recs)
 	if len(rows) != 2 {
@@ -50,7 +56,9 @@ func TestBuildReport_ValidXML(t *testing.T) {
 	}
 	policy := PolicyPublished{Domain: "example.test", ADKIM: "r", ASPF: "r", P: "reject", PCT: 100}
 	recs := []AggregateRecord{
-		{Domain: "example.test", SourceIP: "10.0.0.1", HeaderFrom: "a@example.test", Disposition: "none", DKIMResult: "pass", DKIMAligned: true, SPFResult: "pass", SPFAligned: true},
+		{Domain: "example.test", SourceIP: "10.0.0.1", HeaderFrom: "a@example.test", Disposition: "none",
+			DKIM: []DKIMAuth{{Domain: "example.test", Selector: "sel", Result: "pass", Aligned: true}},
+			SPF:  []SPFAuth{{Domain: "example.test", Scope: "mfrom", Result: "pass", Aligned: true}}},
 	}
 	xmlBytes, err := BuildReport(meta, policy, recs)
 	if err != nil {
