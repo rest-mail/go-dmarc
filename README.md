@@ -134,6 +134,15 @@ SPF/DKIM verdict.
 Full API reference:
 [pkg.go.dev/github.com/rest-mail/go-dmarc](https://pkg.go.dev/github.com/rest-mail/go-dmarc).
 
+## Changelog
+
+Recent releases — see [CHANGELOG.md](CHANGELOG.md) for the complete history.
+
+- **v0.3.0** (2026-07-25) — breaking: `ParsePolicy`/`ParsePct` now return errors (invalid `p=`/`pct=` rejected); adds strict-alignment mode (`AlignmentMode`, ADKIM/ASPF) + RFC 7489 App C `rua` XML fixes.
+- **v0.2.0** (2026-07-25) — breaking: `AggregateRecord` carries per-identifier `DKIM`/`SPF` auth slices; adds `Discover` with organizational-domain fallback and PSL-backed `AlignedOrg`.
+- **v0.1.1** (2026-07-23) — module renamed to `github.com/rest-mail/go-dmarc`.
+- **v0.1.0** (2026-07-23) — initial release: DMARC (RFC 7489) policy lookup/parsing, identifier alignment, and aggregate (`rua`) report XML, standard library only.
+
 ## License
 
 [MIT](LICENSE) © 2026 rest-mail
