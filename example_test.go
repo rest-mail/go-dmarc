@@ -12,8 +12,9 @@ import (
 // (SPF smtp.mailfrom or a verified DKIM d=) also *aligns* with the From domain;
 // when none does, the receiver applies the domain's published policy.
 func Example() {
-	// The record published at _dmarc.example.com. In production this comes from
-	// dmarc.Lookup("example.com", nil); a literal keeps the example DNS-free.
+	// The record published at _dmarc.example.com. In production, discover the
+	// policy with dmarc.Discover("example.com", nil, nil) (which also handles the
+	// organizational-domain fallback for subdomains); a literal keeps this DNS-free.
 	record := "v=DMARC1; p=reject; adkim=r; aspf=r; rua=mailto:agg@example.com"
 	policy := dmarc.ParsePolicy(record) // requested policy for failures
 
@@ -30,6 +31,28 @@ func Example() {
 	}
 	fmt.Printf("dmarc=%v disposition=%s\n", dmarcPass, disposition)
 	// Output: dmarc=false disposition=reject
+}
+
+// ExampleDiscover shows the RFC 7489 §6.6.3 organizational-domain fallback: a
+// subdomain that publishes no _dmarc record of its own inherits the org domain's
+// subdomain policy (sp=, else p=). The resolver is injected to keep this
+// DNS-free; production callers pass nil to use system DNS.
+func ExampleDiscover() {
+	resolver := func(name string) ([]string, error) {
+		// Only the organizational domain publishes a record.
+		if name == "_dmarc.example.com" {
+			return []string{"v=DMARC1; p=reject; sp=quarantine"}, nil
+		}
+		return nil, nil
+	}
+
+	policy, err := dmarc.Discover("newsletter.example.com", resolver, nil)
+	if err != nil {
+		panic(err)
+	}
+	fmt.Printf("via_org=%v from=%s apply=%s\n",
+		policy.ViaOrgDomain, policy.Domain, policy.Requested)
+	// Output: via_org=true from=example.com apply=quarantine
 }
 
 // Example_aggregateReport turns per-message evaluations into the RFC 7489

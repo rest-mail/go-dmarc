@@ -17,14 +17,17 @@
 //
 // # Policy discovery and evaluation
 //
-// [Lookup] fetches the raw DMARC record at _dmarc.<domain> (pass nil for the
-// resolver to use system DNS), and [ParsePolicy] reads its requested policy from
-// the p= tag. [Aligned] reports whether an authenticated domain — from an SPF
-// smtp.mailfrom or a verified DKIM signature's d= — aligns with the From domain:
+// [Discover] performs full policy discovery for a From domain, including the
+// RFC 7489 §6.6.3 Organizational-Domain fallback: when a subdomain publishes no
+// record of its own, it applies the organizational domain's subdomain policy
+// (the sp= tag, or p= when sp= is absent). [Lookup] is the lower-level primitive
+// that fetches the raw record at exactly _dmarc.<domain>, and [ParsePolicy]
+// reads a record's requested policy from the p= tag. [Aligned] reports whether
+// an authenticated domain — from an SPF smtp.mailfrom or a verified DKIM
+// signature's d= — aligns with the From domain:
 //
-//	record, _ := dmarc.Lookup("example.com", nil)
-//	policy := dmarc.ParsePolicy(record) // "none" | "quarantine" | "reject"
-//	if !dmarc.Aligned(authDomain, "example.com") && policy == "reject" {
+//	policy, _ := dmarc.Discover("mail.example.com", nil, nil)
+//	if !dmarc.Aligned(authDomain, "mail.example.com") && policy.Requested == "reject" {
 //		// no aligned identifier passed: reject per published policy
 //	}
 //
