@@ -46,20 +46,43 @@ import (
 	"compress/gzip"
 	"encoding/xml"
 	"fmt"
+	"strings"
 )
 
 // AggregateRecord is one message's DMARC evaluation, the neutral input to
 // [AggregateRecords] and [BuildReport]. It carries only what the aggregate
 // report needs, so the package depends on no particular storage model.
 type AggregateRecord struct {
-	Domain      string // header-From domain (the reported-on domain)
+	Domain      string // header-From (RFC5322.From) domain: the reported-on domain
 	SourceIP    string
-	HeaderFrom  string
+	HeaderFrom  string // header_from identifier; defaults to Domain when empty
 	Disposition string // none|quarantine|reject (policy applied)
-	DKIMResult  string // pass|fail|none
-	DKIMAligned bool
-	SPFResult   string // pass|fail|none
-	SPFAligned  bool
+
+	// DKIM holds the per-signature DKIM authentication results, each carrying the
+	// signature's own d= domain, for the auth_results section. It is empty when
+	// the message carried no signature (no <dkim> element is then emitted).
+	DKIM []DKIMAuth
+	// SPF holds the SPF authentication result(s), each carrying the checked
+	// domain (smtp.mailfrom or HELO) — never the header-From domain.
+	SPF []SPFAuth
+}
+
+// DKIMAuth is one DKIM signature's authentication result as reported in the
+// aggregate report's auth_results (RFC 7489 Appendix C, DKIMAuthResultType).
+type DKIMAuth struct {
+	Domain   string // the signature's d= domain (the authenticating domain)
+	Selector string // the signature's s= selector, if known (optional)
+	Result   string // pass|fail|none|neutral|policy|temperror|permerror
+	Aligned  bool   // whether Domain aligns with the From domain (feeds policy_evaluated)
+}
+
+// SPFAuth is an SPF authentication result as reported in the aggregate report's
+// auth_results (RFC 7489 Appendix C, SPFAuthResultType).
+type SPFAuth struct {
+	Domain  string // the checked domain: smtp.mailfrom, or the HELO name for scope=helo
+	Scope   string // mfrom|helo
+	Result  string // pass|fail|softfail|neutral|none|temperror|permerror
+	Aligned bool   // whether Domain aligns with the From domain (feeds policy_evaluated)
 }
 
 // Feedback is the root element of an RFC 7489 aggregate report.
@@ -124,12 +147,14 @@ type AuthResults struct {
 }
 
 type DKIMResult struct {
-	Domain string `xml:"domain"`
-	Result string `xml:"result"`
+	Domain   string `xml:"domain"`
+	Selector string `xml:"selector,omitempty"`
+	Result   string `xml:"result"`
 }
 
 type SPFResult struct {
 	Domain string `xml:"domain"`
+	Scope  string `xml:"scope,omitempty"`
 	Result string `xml:"result"`
 }
 
@@ -142,55 +167,120 @@ func evaluated(result string, aligned bool) string {
 	return "fail"
 }
 
-// AggregateRecords groups raw per-message evaluations into report rows by
-// (source IP, disposition, evaluated dkim/spf), summing counts.
+// dmarcDKIM returns the DKIM component of policy_evaluated: "pass" when at least
+// one signature both passed and aligned with the From domain, else "fail"
+// (RFC 7489 §6.6.2). An unsigned message is "fail".
+func dmarcDKIM(sigs []DKIMAuth) string {
+	for _, s := range sigs {
+		if evaluated(s.Result, s.Aligned) == "pass" {
+			return "pass"
+		}
+	}
+	return "fail"
+}
+
+// dmarcSPF returns the SPF component of policy_evaluated: "pass" when at least
+// one SPF check both passed and aligned with the From domain, else "fail".
+func dmarcSPF(checks []SPFAuth) string {
+	for _, c := range checks {
+		if evaluated(c.Result, c.Aligned) == "pass" {
+			return "pass"
+		}
+	}
+	return "fail"
+}
+
+// AggregateRecords groups raw per-message evaluations into report rows by source
+// IP, header-From, disposition, the DMARC-aligned dkim/spf verdict, and the
+// full set of authentication results, summing counts.
 func AggregateRecords(records []AggregateRecord) []ReportRecord {
 	type key struct {
-		sourceIP, headerFrom, disposition, dkimEval, spfEval, dkimAuth, spfAuth, authDomain string
+		sourceIP, headerFrom, disposition, dkimEval, spfEval, auth string
 	}
 	order := []key{}
 	counts := map[key]int{}
+	rep := map[key]AggregateRecord{}
 	for _, r := range records {
 		k := key{
 			sourceIP:    r.SourceIP,
 			headerFrom:  r.HeaderFrom,
 			disposition: r.Disposition,
-			dkimEval:    evaluated(r.DKIMResult, r.DKIMAligned),
-			spfEval:     evaluated(r.SPFResult, r.SPFAligned),
-			dkimAuth:    r.DKIMResult,
-			spfAuth:     r.SPFResult,
-			authDomain:  r.Domain,
+			dkimEval:    dmarcDKIM(r.DKIM),
+			spfEval:     dmarcSPF(r.SPF),
+			auth:        authResultsKey(r.DKIM, r.SPF),
 		}
 		if _, seen := counts[k]; !seen {
 			order = append(order, k)
+			rep[k] = r
 		}
 		counts[k]++
 	}
 
 	out := make([]ReportRecord, 0, len(order))
 	for _, k := range order {
-		hf := k.headerFrom
+		r := rep[k]
+		hf := r.HeaderFrom
 		if hf == "" {
-			hf = k.authDomain
+			hf = r.Domain
 		}
 		out = append(out, ReportRecord{
 			Row: Row{
-				SourceIP: k.sourceIP,
+				SourceIP: r.SourceIP,
 				Count:    counts[k],
 				PolicyEvaluated: PolicyEvaluated{
-					Disposition: k.disposition,
+					Disposition: r.Disposition,
 					DKIM:        k.dkimEval,
 					SPF:         k.spfEval,
 				},
 			},
 			Identifiers: Identifiers{HeaderFrom: hf},
-			AuthResults: AuthResults{
-				DKIM: []DKIMResult{{Domain: k.authDomain, Result: k.dkimAuth}},
-				SPF:  []SPFResult{{Domain: k.authDomain, Result: k.spfAuth}},
-			},
+			AuthResults: authResults(r.DKIM, r.SPF),
 		})
 	}
 	return out
+}
+
+// authResults maps a message's DKIM/SPF authentication results to the report
+// schema, reporting each DKIM signature's d= domain and selector and each SPF
+// check's checked domain and scope individually (RFC 7489 §7.2, Appendix C). No
+// <dkim> element is produced when the message carried no signature.
+func authResults(dkim []DKIMAuth, spf []SPFAuth) AuthResults {
+	var ar AuthResults
+	for _, d := range dkim {
+		ar.DKIM = append(ar.DKIM, DKIMResult{Domain: d.Domain, Selector: d.Selector, Result: d.Result})
+	}
+	for _, s := range spf {
+		ar.SPF = append(ar.SPF, SPFResult{Domain: s.Domain, Scope: s.Scope, Result: s.Result})
+	}
+	return ar
+}
+
+// authResultsKey builds a comparable identity for a message's auth_results so
+// that rows with identical authentication details group and count together. The
+// NUL separators cannot appear in a domain, selector, or result value, so the
+// encoding is unambiguous.
+func authResultsKey(dkim []DKIMAuth, spf []SPFAuth) string {
+	var b strings.Builder
+	for _, d := range dkim {
+		b.WriteString("dkim\x00")
+		b.WriteString(d.Domain)
+		b.WriteByte(0)
+		b.WriteString(d.Selector)
+		b.WriteByte(0)
+		b.WriteString(d.Result)
+		b.WriteByte(0)
+	}
+	b.WriteByte('\n')
+	for _, s := range spf {
+		b.WriteString("spf\x00")
+		b.WriteString(s.Domain)
+		b.WriteByte(0)
+		b.WriteString(s.Scope)
+		b.WriteByte(0)
+		b.WriteString(s.Result)
+		b.WriteByte(0)
+	}
+	return b.String()
 }
 
 // BuildReport assembles an RFC 7489 aggregate report XML document (with the XML
