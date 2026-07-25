@@ -58,7 +58,12 @@ type AggregateRecord struct {
 	Domain      string // header-From (RFC5322.From) domain: the reported-on domain
 	SourceIP    string
 	HeaderFrom  string // header_from identifier; defaults to Domain when empty
-	Disposition string // none|quarantine|reject (policy applied)
+	Disposition string // none|quarantine|reject (policy applied); other values normalize to none
+
+	// EnvelopeFrom is the RFC5321.MailFrom domain (the identifiers/envelope_from
+	// element, which RFC 7489 requires). When empty it is derived from the SPF
+	// mfrom check's domain; the element is always emitted.
+	EnvelopeFrom string
 
 	// DKIM holds the per-signature DKIM authentication results, each carrying the
 	// signature's own d= domain, for the auth_results section. It is empty when
@@ -140,7 +145,8 @@ type PolicyEvaluated struct {
 }
 
 type Identifiers struct {
-	HeaderFrom string `xml:"header_from"`
+	EnvelopeFrom string `xml:"envelope_from"`
+	HeaderFrom   string `xml:"header_from"`
 }
 
 type AuthResults struct {
@@ -156,17 +162,83 @@ type DKIMResult struct {
 
 type SPFResult struct {
 	Domain string `xml:"domain"`
-	Scope  string `xml:"scope,omitempty"`
+	Scope  string `xml:"scope"`
 	Result string `xml:"result"`
 }
 
 // evaluated returns the DMARC-aligned pass/fail: a mechanism only counts as
 // passing DMARC when it both passed AND aligned with the From domain.
 func evaluated(result string, aligned bool) string {
-	if result == "pass" && aligned {
+	if aligned && strings.EqualFold(strings.TrimSpace(result), "pass") {
 		return "pass"
 	}
 	return "fail"
+}
+
+// The RFC 7489 Appendix C result/scope/disposition types are closed
+// enumerations; a value outside the set makes the document fail schema
+// validation. The normalize* helpers lower-case the input and fall back to a
+// safe in-enumeration default (none for results/disposition, mfrom for scope)
+// so an unknown or empty value never reaches the emitted XML.
+
+func normalizeDKIMResult(s string) string {
+	switch v := strings.ToLower(strings.TrimSpace(s)); v {
+	case "none", "pass", "fail", "policy", "neutral", "temperror", "permerror":
+		return v
+	default:
+		return "none"
+	}
+}
+
+func normalizeSPFResult(s string) string {
+	switch v := strings.ToLower(strings.TrimSpace(s)); v {
+	case "none", "neutral", "pass", "fail", "softfail", "temperror", "permerror":
+		return v
+	default:
+		return "none"
+	}
+}
+
+func normalizeSPFScope(s string) string {
+	switch v := strings.ToLower(strings.TrimSpace(s)); v {
+	case "helo", "mfrom":
+		return v
+	default:
+		return "mfrom"
+	}
+}
+
+func normalizeDisposition(s string) string {
+	switch v := strings.ToLower(strings.TrimSpace(s)); v {
+	case "none", "quarantine", "reject":
+		return v
+	default:
+		return "none"
+	}
+}
+
+// headerFrom resolves the header_from identifier, defaulting to the reported-on
+// domain when the record carried no explicit header-From.
+func headerFrom(r AggregateRecord) string {
+	if r.HeaderFrom != "" {
+		return r.HeaderFrom
+	}
+	return r.Domain
+}
+
+// envelopeFrom resolves the RFC5321.MailFrom domain for the required
+// identifiers/envelope_from element, deriving it from the SPF mfrom check's
+// domain when the caller did not supply one.
+func envelopeFrom(r AggregateRecord) string {
+	if r.EnvelopeFrom != "" {
+		return r.EnvelopeFrom
+	}
+	for _, s := range r.SPF {
+		if normalizeSPFScope(s.Scope) == "mfrom" && s.Domain != "" {
+			return s.Domain
+		}
+	}
+	return ""
 }
 
 // dmarcDKIM returns the DKIM component of policy_evaluated: "pass" when at least
@@ -197,19 +269,20 @@ func dmarcSPF(checks []SPFAuth) string {
 // full set of authentication results, summing counts.
 func AggregateRecords(records []AggregateRecord) []ReportRecord {
 	type key struct {
-		sourceIP, headerFrom, disposition, dkimEval, spfEval, auth string
+		sourceIP, headerFrom, envelopeFrom, disposition, dkimEval, spfEval, auth string
 	}
 	order := []key{}
 	counts := map[key]int{}
 	rep := map[key]AggregateRecord{}
 	for _, r := range records {
 		k := key{
-			sourceIP:    r.SourceIP,
-			headerFrom:  r.HeaderFrom,
-			disposition: r.Disposition,
-			dkimEval:    dmarcDKIM(r.DKIM),
-			spfEval:     dmarcSPF(r.SPF),
-			auth:        authResultsKey(r.DKIM, r.SPF),
+			sourceIP:     r.SourceIP,
+			headerFrom:   headerFrom(r),
+			envelopeFrom: envelopeFrom(r),
+			disposition:  normalizeDisposition(r.Disposition),
+			dkimEval:     dmarcDKIM(r.DKIM),
+			spfEval:      dmarcSPF(r.SPF),
+			auth:         authResultsKey(r.DKIM, r.SPF),
 		}
 		if _, seen := counts[k]; !seen {
 			order = append(order, k)
@@ -221,21 +294,20 @@ func AggregateRecords(records []AggregateRecord) []ReportRecord {
 	out := make([]ReportRecord, 0, len(order))
 	for _, k := range order {
 		r := rep[k]
-		hf := r.HeaderFrom
-		if hf == "" {
-			hf = r.Domain
-		}
 		out = append(out, ReportRecord{
 			Row: Row{
 				SourceIP: r.SourceIP,
 				Count:    counts[k],
 				PolicyEvaluated: PolicyEvaluated{
-					Disposition: r.Disposition,
+					Disposition: k.disposition,
 					DKIM:        k.dkimEval,
 					SPF:         k.spfEval,
 				},
 			},
-			Identifiers: Identifiers{HeaderFrom: hf},
+			Identifiers: Identifiers{
+				EnvelopeFrom: k.envelopeFrom,
+				HeaderFrom:   k.headerFrom,
+			},
 			AuthResults: authResults(r.DKIM, r.SPF),
 		})
 	}
@@ -249,10 +321,18 @@ func AggregateRecords(records []AggregateRecord) []ReportRecord {
 func authResults(dkim []DKIMAuth, spf []SPFAuth) AuthResults {
 	var ar AuthResults
 	for _, d := range dkim {
-		ar.DKIM = append(ar.DKIM, DKIMResult{Domain: d.Domain, Selector: d.Selector, Result: d.Result})
+		ar.DKIM = append(ar.DKIM, DKIMResult{
+			Domain:   d.Domain,
+			Selector: d.Selector,
+			Result:   normalizeDKIMResult(d.Result),
+		})
 	}
 	for _, s := range spf {
-		ar.SPF = append(ar.SPF, SPFResult{Domain: s.Domain, Scope: s.Scope, Result: s.Result})
+		ar.SPF = append(ar.SPF, SPFResult{
+			Domain: s.Domain,
+			Scope:  normalizeSPFScope(s.Scope),
+			Result: normalizeSPFResult(s.Result),
+		})
 	}
 	return ar
 }
@@ -269,7 +349,7 @@ func authResultsKey(dkim []DKIMAuth, spf []SPFAuth) string {
 		b.WriteByte(0)
 		b.WriteString(d.Selector)
 		b.WriteByte(0)
-		b.WriteString(d.Result)
+		b.WriteString(normalizeDKIMResult(d.Result))
 		b.WriteByte(0)
 	}
 	b.WriteByte('\n')
@@ -277,9 +357,9 @@ func authResultsKey(dkim []DKIMAuth, spf []SPFAuth) string {
 		b.WriteString("spf\x00")
 		b.WriteString(s.Domain)
 		b.WriteByte(0)
-		b.WriteString(s.Scope)
+		b.WriteString(normalizeSPFScope(s.Scope))
 		b.WriteByte(0)
-		b.WriteString(s.Result)
+		b.WriteString(normalizeSPFResult(s.Result))
 		b.WriteByte(0)
 	}
 	return b.String()
