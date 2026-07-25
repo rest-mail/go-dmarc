@@ -2,6 +2,7 @@ package dmarc
 
 import (
 	"math"
+	"strconv"
 	"strings"
 )
 
@@ -80,6 +81,64 @@ func AlignedOrg(authDomain, fromDomain string, orgDomain OrgDomainFunc) bool {
 	// marks an input that is itself a public suffix (per a PSL-backed hook),
 	// which can never align.
 	return authOrg != "" && authOrg == fromOrg
+}
+
+// AlignmentMode is the DMARC identifier-alignment mode a record requests through
+// its adkim= / aspf= tag (RFC 7489 §6.3): relaxed (the default) or strict.
+type AlignmentMode int
+
+const (
+	// AlignmentRelaxed is DMARC relaxed alignment (adkim=r / aspf=r — the default
+	// applied when the tag is absent). Two identifiers align when their
+	// Organizational Domains are equal, so sibling and parent/child subdomains of
+	// one organizational domain align. It is the zero value, so a zero-valued
+	// [Policy] (no published record) reports the correct default.
+	AlignmentRelaxed AlignmentMode = iota
+	// AlignmentStrict is DMARC strict alignment (adkim=s / aspf=s). The two
+	// identifier domains must be an exact, case-insensitive FQDN match; a
+	// subdomain of the From domain does NOT align. RFC 7489 §10.4 documents strict
+	// alignment as the mitigation for a hostile delegated subdomain.
+	AlignmentStrict
+)
+
+// String returns "relaxed" or "strict"; any other value renders as
+// AlignmentMode(<n>).
+func (m AlignmentMode) String() string {
+	switch m {
+	case AlignmentRelaxed:
+		return "relaxed"
+	case AlignmentStrict:
+		return "strict"
+	default:
+		return "AlignmentMode(" + strconv.Itoa(int(m)) + ")"
+	}
+}
+
+// AlignedMode reports whether authDomain aligns with fromDomain under the given
+// DMARC alignment mode (RFC 7489 §3.1), with an injectable [OrgDomainFunc] for
+// the relaxed org-domain derivation (nil uses [DefaultOrgDomain]). Callers pass
+// the mode parsed from a record with [ParseADKIM] (for a DKIM d= identifier) or
+// [ParseASPF] (for an SPF-authenticated identifier), or exposed on
+// [Policy.ADKIM] / [Policy.ASPF].
+//
+// Under [AlignmentRelaxed] the result is exactly [AlignedOrg]: equal
+// Organizational Domains align. Under [AlignmentStrict] the org-domain hook is
+// not consulted — the two identifier domains must be an exact, case-insensitive
+// FQDN match after [normalizeDomain], so a From domain and a delegated subdomain
+// of it do NOT align. Both inputs are sanitized as in [AlignedOrg]; an empty
+// identifier never aligns.
+func AlignedMode(authDomain, fromDomain string, mode AlignmentMode, orgDomain OrgDomainFunc) bool {
+	if mode != AlignmentStrict {
+		return AlignedOrg(authDomain, fromDomain, orgDomain)
+	}
+	// Strict alignment: an exact, case-insensitive FQDN match after
+	// normalization. The org-domain hook is deliberately not consulted, so a
+	// delegated subdomain of the From domain does not align. An empty (absent)
+	// identifier never aligns, and two empties must not compare equal into a
+	// false pass.
+	authDomain = normalizeDomain(authDomain)
+	fromDomain = normalizeDomain(fromDomain)
+	return authDomain != "" && authDomain == fromDomain
 }
 
 // normalizeDomain canonicalizes a domain name for alignment comparison. It

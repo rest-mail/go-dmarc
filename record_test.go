@@ -261,6 +261,123 @@ func TestAlignedOrg(t *testing.T) {
 	}
 }
 
+// Issue #10: adkim= / aspf= (RFC 7489 §6.3) select the DKIM and SPF
+// identifier-alignment mode — "r" relaxed (the default) or "s" strict. A parser
+// that never reads the tags leaves every record relaxed, so a domain that
+// publishes strict alignment to defend against a hostile delegated subdomain
+// (§10.4) is silently given relaxed semantics. The tag name and value are
+// case-insensitive, whitespace around "=" is tolerated, and any value other than
+// "s" (including an absent tag or an unknown value) degrades to the relaxed
+// default.
+func TestParseAlignmentMode(t *testing.T) {
+	cases := []struct {
+		record      string
+		adkim, aspf AlignmentMode
+	}{
+		{"v=DMARC1; p=reject", AlignmentRelaxed, AlignmentRelaxed}, // absent -> relaxed default
+		{"v=DMARC1; p=reject; adkim=r; aspf=r", AlignmentRelaxed, AlignmentRelaxed},
+		{"v=DMARC1; p=reject; adkim=s", AlignmentStrict, AlignmentRelaxed}, // aspf still defaults relaxed
+		{"v=DMARC1; p=reject; aspf=s", AlignmentRelaxed, AlignmentStrict},
+		{"v=DMARC1; p=reject; adkim=s; aspf=s", AlignmentStrict, AlignmentStrict},
+		{"v=DMARC1; p=reject; ADKIM=S; ASPF=S", AlignmentStrict, AlignmentStrict}, // case-insensitive name and value
+		{"v=DMARC1; p=reject; adkim = s", AlignmentStrict, AlignmentRelaxed},      // WSP around '=' per ABNF
+		{"v=DMARC1; p=reject; adkim=x", AlignmentRelaxed, AlignmentRelaxed},       // unknown value -> relaxed default
+		{"", AlignmentRelaxed, AlignmentRelaxed},
+	}
+	for _, c := range cases {
+		if got := ParseADKIM(c.record); got != c.adkim {
+			t.Errorf("ParseADKIM(%q) = %v, want %v", c.record, got, c.adkim)
+		}
+		if got := ParseASPF(c.record); got != c.aspf {
+			t.Errorf("ParseASPF(%q) = %v, want %v", c.record, got, c.aspf)
+		}
+	}
+}
+
+// Issue #10: AlignedMode must honour the alignment mode. Under strict alignment
+// the identifier domain must be an exact FQDN match with the From domain, so a
+// delegated subdomain that aligns under relaxed must NOT align under strict.
+// This is the reported defect: adkim=s was ignored, so a DKIM signature with
+// d=example.com was reported aligned for a From of mail.example.com even though
+// the domain opted into strict alignment specifically to reject it.
+func TestAlignedModeStrictDKIM(t *testing.T) {
+	const record = "v=DMARC1; p=reject; adkim=s"
+	const dkimDomain = "example.com"      // DKIM d=
+	const fromDomain = "mail.example.com" // header From, a subdomain of d=
+
+	// Relaxed: the two share organizational domain example.com and align.
+	if !AlignedMode(dkimDomain, fromDomain, AlignmentRelaxed, nil) {
+		t.Fatalf("relaxed: AlignedMode(%q, %q) = false, want true (share org domain)", dkimDomain, fromDomain)
+	}
+	// Strict, parsed from adkim=s: an exact FQDN match is required, so the
+	// subdomain does not align.
+	if mode := ParseADKIM(record); AlignedMode(dkimDomain, fromDomain, mode, nil) {
+		t.Errorf("strict: AlignedMode(%q, %q, %v) = true, want false (adkim=s needs exact match)", dkimDomain, fromDomain, mode)
+	}
+	// An exact match still aligns under strict.
+	if !AlignedMode("mail.example.com", "mail.example.com", AlignmentStrict, nil) {
+		t.Errorf("strict: an exact FQDN match must align")
+	}
+}
+
+// Issue #10: aspf=s applies strict alignment to the SPF-authenticated domain.
+func TestAlignedModeStrictSPF(t *testing.T) {
+	const record = "v=DMARC1; p=reject; aspf=s"
+	const spfDomain = "bounce.example.com" // SPF-checked MAIL FROM domain
+	const fromDomain = "example.com"       // header From, parent of the SPF domain
+
+	if !AlignedMode(spfDomain, fromDomain, AlignmentRelaxed, nil) {
+		t.Fatalf("relaxed: AlignedMode(%q, %q) = false, want true (subdomain of From)", spfDomain, fromDomain)
+	}
+	if mode := ParseASPF(record); AlignedMode(spfDomain, fromDomain, mode, nil) {
+		t.Errorf("strict: AlignedMode(%q, %q, %v) = true, want false (aspf=s needs exact match)", spfDomain, fromDomain, mode)
+	}
+}
+
+// Issue #10: with no adkim/aspf tag the mode defaults to relaxed, so AlignedMode
+// is identical to Aligned/AlignedOrg — existing behaviour is unchanged for
+// records that do not opt into strict alignment.
+func TestAlignedModeDefaultRelaxed(t *testing.T) {
+	const record = "v=DMARC1; p=reject" // no adkim/aspf
+	adkim := ParseADKIM(record)         // AlignmentRelaxed
+	cases := []struct {
+		auth, from string
+		want       bool
+	}{
+		{"em.example.test", "mail.example.test", true}, // siblings align under relaxed
+		{"mail.example.test", "example.test", true},    // subdomain aligns under relaxed
+		{"evil-example.test", "example.test", false},   // lookalike never aligns
+	}
+	for _, c := range cases {
+		got := AlignedMode(c.auth, c.from, adkim, nil)
+		if got != c.want {
+			t.Errorf("AlignedMode(%q, %q, relaxed) = %v, want %v", c.auth, c.from, got, c.want)
+		}
+		if got != Aligned(c.auth, c.from) {
+			t.Errorf("AlignedMode relaxed default must equal Aligned for %q/%q", c.auth, c.from)
+		}
+	}
+}
+
+// Issue #10: Discover must surface the record's alignment modes so a caller that
+// only has the discovered Policy can request the right (possibly strict)
+// alignment. A zero Policy (no record) reports the relaxed default.
+func TestDiscoverExposesAlignmentMode(t *testing.T) {
+	resolver := func(string) ([]string, error) {
+		return []string{"v=DMARC1; p=reject; adkim=s; aspf=r"}, nil
+	}
+	pol, err := Discover("example.test", resolver, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pol.ADKIM != AlignmentStrict {
+		t.Errorf("Policy.ADKIM = %v, want strict", pol.ADKIM)
+	}
+	if pol.ASPF != AlignmentRelaxed {
+		t.Errorf("Policy.ASPF = %v, want relaxed", pol.ASPF)
+	}
+}
+
 func TestLookup(t *testing.T) {
 	t.Run("found", func(t *testing.T) {
 		resolver := func(name string) ([]string, error) {

@@ -56,6 +56,15 @@ minor bump may include breaking changes.
   Suffix List-backed organizational-domain derivation for correct alignment
   under multi-label public suffixes (e.g. `co.uk`). **`DefaultOrgDomain`** is the
   registry-free default; `Aligned` is now `AlignedOrg` with that default hook.
+- **Strict alignment.** `adkim=` / `aspf=` (RFC 7489 §6.3) are now parsed with
+  the new **`ParseADKIM`** / **`ParseASPF`** functions into the new
+  **`AlignmentMode`** type (`AlignmentRelaxed` — the default — or
+  `AlignmentStrict`), and **`Policy.ADKIM`** / **`Policy.ASPF`** expose the modes
+  from `Discover`. **`AlignedMode`** evaluates alignment under a given mode:
+  strict requires an exact FQDN match (the §10.4 mitigation for a hostile
+  delegated subdomain), while relaxed is unchanged from `AlignedOrg`. `Aligned`
+  and `AlignedOrg` keep their relaxed semantics, so records without the tags
+  behave as before.
 - Report XML: `DKIMResult` gained a `selector` element and `SPFResult` gained a
   `scope` element (both `omitempty`).
 

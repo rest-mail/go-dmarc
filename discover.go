@@ -29,6 +29,13 @@ type Policy struct {
 	// Organizational-Domain fallback rather than an exact match on the queried
 	// domain.
 	ViaOrgDomain bool
+	// ADKIM and ASPF are the DKIM and SPF identifier-alignment modes the record
+	// requests via its adkim= / aspf= tags (RFC 7489 §6.3): AlignmentRelaxed (the
+	// default) or AlignmentStrict. Pass them to [AlignedMode] to evaluate DKIM and
+	// SPF alignment under the mode the domain published. Both are AlignmentRelaxed
+	// for a zero Policy (no applicable record), the documented default.
+	ADKIM AlignmentMode
+	ASPF  AlignmentMode
 }
 
 // OrgDomainFunc derives the Organizational Domain (RFC 7489 §3.2) of a domain,
@@ -93,7 +100,14 @@ func Discover(domain string, resolver TXTResolver, orgDomain OrgDomainFunc) (Pol
 		if err != nil {
 			return Policy{}, err
 		}
-		return Policy{Domain: domain, Record: record, Requested: requested, Pct: pct}, nil
+		return Policy{
+			Domain:    domain,
+			Record:    record,
+			Requested: requested,
+			Pct:       pct,
+			ADKIM:     ParseADKIM(record),
+			ASPF:      ParseASPF(record),
+		}, nil
 	}
 
 	// §6.6.3 step 3: the exact-domain set is empty, so fall back to the record at
@@ -130,6 +144,8 @@ func Discover(domain string, resolver TXTResolver, orgDomain OrgDomainFunc) (Pol
 		Requested:    requested,
 		Pct:          pct,
 		ViaOrgDomain: true,
+		ADKIM:        ParseADKIM(orgRecord),
+		ASPF:         ParseASPF(orgRecord),
 	}, nil
 }
 
