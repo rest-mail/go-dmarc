@@ -2,6 +2,7 @@ package dmarc
 
 import (
 	"errors"
+	"net"
 	"testing"
 )
 
@@ -72,6 +73,38 @@ func TestLookup(t *testing.T) {
 		resolver := func(string) ([]string, error) { return nil, wantErr }
 		if _, err := Lookup("example.test", resolver); !errors.Is(err, wantErr) {
 			t.Errorf("expected resolver error to propagate, got %v", err)
+		}
+	})
+
+	// Issue #8: net.LookupTXT returns a *net.DNSError with IsNotFound for a name
+	// that does not exist, which is the common case for a domain that simply
+	// publishes no DMARC record. That is "no policy" (RFC 7489 §6.6.3), not a
+	// lookup failure, and must map to the documented ("", nil).
+	t.Run("NXDOMAIN is no-record, not an error", func(t *testing.T) {
+		resolver := func(string) ([]string, error) {
+			return nil, &net.DNSError{Err: "no such host", Name: "_dmarc.example.test", IsNotFound: true}
+		}
+		rec, err := Lookup("example.test", resolver)
+		if err != nil {
+			t.Fatalf("NXDOMAIN must not be an error: %v", err)
+		}
+		if rec != "" {
+			t.Errorf("expected empty record, got %q", rec)
+		}
+	})
+
+	// A transient failure (SERVFAIL/timeout) is NOT not-found: the caller must be
+	// able to tell it apart from no-record so it does not fail open, so it must
+	// still surface as an error (temperror).
+	t.Run("transient DNS failure surfaces as error", func(t *testing.T) {
+		tempErr := &net.DNSError{Err: "server misbehaving", Name: "_dmarc.example.test", IsTemporary: true}
+		resolver := func(string) ([]string, error) { return nil, tempErr }
+		rec, err := Lookup("example.test", resolver)
+		if err == nil {
+			t.Fatalf("transient DNS failure must surface as an error, got record %q", rec)
+		}
+		if !errors.Is(err, tempErr) {
+			t.Errorf("expected the transient error to propagate, got %v", err)
 		}
 	})
 }
