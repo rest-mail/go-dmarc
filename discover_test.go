@@ -23,6 +23,26 @@ func TestDefaultOrgDomain(t *testing.T) {
 	}
 }
 
+// Issue #14: the subdomain policy tag (sp=) shares the case-insensitivity rules
+// of p= — the tag name matches regardless of case and the enumerated value is
+// normalised to lower case, so an org record like "v=DMARC1; p=reject;
+// SP=Quarantine" applies "quarantine" to subdomains rather than silently
+// dropping the sp= tag and falling back to p=.
+func TestParseSubdomainPolicyCaseInsensitive(t *testing.T) {
+	cases := []struct{ record, want string }{
+		{"v=DMARC1; p=reject; SP=quarantine", "quarantine"}, // uppercase tag name
+		{"v=DMARC1; p=reject; sp=QUARANTINE", "quarantine"}, // uppercase value normalised
+		{"v=DMARC1; p=reject; Sp=Reject", "reject"},         // mixed case, both
+		{"v=DMARC1; P=Reject", "reject"},                    // no sp= -> falls back to p= (also case-insensitive)
+		{"v=DMARC1; p=reject; sp=none", "none"},             // lowercase still works
+	}
+	for _, c := range cases {
+		if got := parseSubdomainPolicy(c.record); got != c.want {
+			t.Errorf("parseSubdomainPolicy(%q) = %q, want %q", c.record, got, c.want)
+		}
+	}
+}
+
 func TestDiscover(t *testing.T) {
 	// The organizational domain publishes a record whose subdomain policy (sp=)
 	// differs from its own policy (p=), so we can tell which one was applied.

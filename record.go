@@ -105,14 +105,36 @@ func hasDMARCVersion(record string) bool {
 	return strings.EqualFold(name, "v") && strings.EqualFold(value, "DMARC1")
 }
 
+// tagValue returns the value of the named tag from a DMARC record, or ("",
+// false) when the tag is absent. Tag names are matched case-insensitively and
+// whitespace around the "=" is tolerated, per the RFC 7489 §6.4 ABNF
+// (dmarc-tag = key *WSP "=" *WSP value; tag names are case-insensitive). The
+// value is returned with surrounding whitespace trimmed but its case preserved:
+// callers matching an enumerated value (p=, sp=) lower-case it themselves, while
+// opaque values such as rua/ruf URIs must keep their case.
+func tagValue(record, name string) (string, bool) {
+	for _, part := range strings.Split(record, ";") {
+		tag, value, found := strings.Cut(part, "=")
+		if !found {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(tag), name) {
+			return strings.TrimSpace(value), true
+		}
+	}
+	return "", false
+}
+
 // ParsePolicy extracts the requested policy (the p= tag) from a DMARC record.
 // It returns "none" when no p= tag is present.
+//
+// The tag name and the enumerated value (none/quarantine/reject) are matched
+// case-insensitively per RFC 7489 §6.3/§6.4: "P=Reject" is recognised, and the
+// value is normalised to lower case so a downstream comparison against the
+// lower-case policy names is not defeated by a record that writes "REJECT".
 func ParsePolicy(record string) string {
-	for _, part := range strings.Split(record, ";") {
-		part = strings.TrimSpace(part)
-		if strings.HasPrefix(part, "p=") {
-			return strings.TrimPrefix(part, "p=")
-		}
+	if value, ok := tagValue(record, "p"); ok {
+		return strings.ToLower(value)
 	}
 	return "none"
 }
@@ -130,22 +152,18 @@ func ParsePolicy(record string) string {
 // percent of failing messages and the next-lower policy to the remainder;
 // selecting that sample from crypto/rand is the caller's responsibility.
 func ParsePct(record string) (int, error) {
-	for _, part := range strings.Split(record, ";") {
-		part = strings.TrimSpace(part)
-		if !strings.HasPrefix(part, "pct=") {
-			continue
-		}
-		value := strings.TrimSpace(strings.TrimPrefix(part, "pct="))
-		pct, err := strconv.Atoi(value)
-		if err != nil {
-			return 0, fmt.Errorf("dmarc: invalid pct=%q: %w", value, err)
-		}
-		if pct < 0 || pct > 100 {
-			return 0, fmt.Errorf("dmarc: pct=%d out of range 0-100", pct)
-		}
-		return pct, nil
+	value, ok := tagValue(record, "pct")
+	if !ok {
+		return 100, nil
 	}
-	return 100, nil
+	pct, err := strconv.Atoi(value)
+	if err != nil {
+		return 0, fmt.Errorf("dmarc: invalid pct=%q: %w", value, err)
+	}
+	if pct < 0 || pct > 100 {
+		return 0, fmt.Errorf("dmarc: pct=%d out of range 0-100", pct)
+	}
+	return pct, nil
 }
 
 // Aligned reports whether an authenticated domain aligns with the From domain

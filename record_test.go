@@ -22,6 +22,31 @@ func TestParsePolicy(t *testing.T) {
 	}
 }
 
+// Issue #14: DMARC tag names are case-insensitive and the enumerated policy
+// values none/quarantine/reject are matched case-insensitively (RFC 7489
+// §6.3/§6.4 ABNF). A case-sensitive parser silently drops the policy of an
+// otherwise-valid record: "P=reject" fails the "p=" prefix test and defaults to
+// "none", while "p=REJECT" is returned verbatim so a downstream `== "reject"`
+// comparison misses it and the reject policy is not enforced. ParsePolicy must
+// recognise the tag regardless of case and normalise the value to lower case.
+func TestParsePolicyCaseInsensitive(t *testing.T) {
+	cases := []struct{ record, want string }{
+		{"v=DMARC1; P=reject", "reject"},         // uppercase tag name
+		{"v=DMARC1; p=REJECT", "reject"},         // uppercase value normalised
+		{"v=DMARC1; P=Reject", "reject"},         // mixed case, both
+		{"v=DMARC1; P=Quarantine", "quarantine"}, // mixed-case quarantine
+		{"v=DMARC1; P=NONE", "none"},             // uppercase none
+		{"v=dmarc1; p=reject", "reject"},         // lowercase still works
+		{"v=DMARC1; p = reject", "reject"},       // WSP around '=' per ABNF
+		{"v=DMARC1; sp=reject", "none"},          // sp= is not p=; default none
+	}
+	for _, c := range cases {
+		if got := ParsePolicy(c.record); got != c.want {
+			t.Errorf("ParsePolicy(%q) = %q, want %q", c.record, got, c.want)
+		}
+	}
+}
+
 // Issue #11: pct= (RFC 7489 §6.3) sets the percentage of failing messages the
 // requested policy is applied to for a staged rollout. It must be parsed and
 // exposed (default 100 when absent) so a receiver can sample rather than always
@@ -37,6 +62,7 @@ func TestParsePct(t *testing.T) {
 		{"v=DMARC1; p=reject; pct=100", 100}, // explicit full enforcement
 		{"v=DMARC1; p=reject", 100},          // absent -> default 100
 		{"v=DMARC1; p=reject; pct= 50 ", 50}, // whitespace around the value tolerated
+		{"v=DMARC1; p=reject; PCT=25", 25},   // issue #14: tag name is case-insensitive
 		{"", 100},                            // empty record -> default 100
 	}
 	for _, c := range valid {
