@@ -24,16 +24,23 @@ likes; a reporter later hands a slice of neutral `AggregateRecord` values to
 
 ## Features
 
-- **Policy discovery** — `Lookup` fetches the `_dmarc.<domain>` TXT record and
-  `ParsePolicy` reads its requested policy (`p=`).
+- **Policy discovery** — `Discover` resolves a From domain's policy with the
+  RFC 7489 §6.6.3 organizational-domain fallback (a subdomain with no record of
+  its own inherits the org domain's `sp=`/`p=`); `Lookup` fetches a single
+  `_dmarc.<domain>` TXT record and `ParsePolicy` reads its `p=` tag.
 - **Identifier alignment** — `Aligned` implements DMARC relaxed alignment
   (RFC 7489 §3.1) between an authenticated domain and the From domain.
 - **Aggregate reporting** — `AggregateRecords` groups per-message evaluations
   into report rows, `BuildReport` marshals the RFC 7489 aggregate-report XML, and
   `Gzip` compresses it for the `application/gzip` attachment (§7.2.1).
-- **Injectable DNS** — `Lookup` takes a `TXTResolver` (its signature matches
-  `net.LookupTXT`) for tests and custom lookups, or `nil` for system DNS.
-- **Zero external dependencies** — standard library only.
+- **Injectable DNS & org-domain** — `Lookup`/`Discover` take a `TXTResolver`
+  (its signature matches `net.LookupTXT`) for tests and custom lookups, and
+  `Discover` takes an `OrgDomainFunc` for organizational-domain derivation
+  (`nil` uses system DNS and the built-in heuristic respectively).
+- **Zero external dependencies** — standard library only. Organizational-domain
+  derivation defaults to a registry-free heuristic (`DefaultOrgDomain`); pass a
+  Public Suffix List-backed `OrgDomainFunc` (e.g. wrapping
+  `golang.org/x/net/publicsuffix`) when you need multi-label public suffixes.
 
 ## Install
 
@@ -58,8 +65,9 @@ import (
 )
 
 func main() {
-	// The record published at _dmarc.example.com. In production this comes from
-	// dmarc.Lookup("example.com", nil); a literal keeps the example DNS-free.
+	// The record published at _dmarc.example.com. In production, discover the
+	// policy with dmarc.Discover("example.com", nil, nil) (which also handles the
+	// organizational-domain fallback for subdomains); a literal keeps this DNS-free.
 	record := "v=DMARC1; p=reject; adkim=r; aspf=r; rua=mailto:agg@example.com"
 	policy := dmarc.ParsePolicy(record) // "none" | "quarantine" | "reject"
 
