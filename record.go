@@ -44,7 +44,7 @@ func Lookup(domain string, resolver TXTResolver) (string, error) {
 }
 
 // lookupDMARC queries _dmarc.<domain> and returns the TXT records at that name
-// that begin with the v=DMARC1 tag — the RFC 7489 §6.6.3 filtering that discards
+// whose first tag is the v=DMARC1 version tag — the RFC 7489 §6.6.3 filtering that discards
 // non-DMARC TXT records (SPF, verification tokens, and the like). A nil resolver
 // falls back to [net.LookupTXT]. It applies Lookup's error contract: a not-found
 // (NXDOMAIN) result maps to an empty set with a nil error, while other resolver
@@ -68,11 +68,41 @@ func lookupDMARC(domain string, resolver TXTResolver) ([]string, error) {
 	}
 	var dmarc []string
 	for _, r := range records {
-		if strings.HasPrefix(r, "v=DMARC1") {
+		if hasDMARCVersion(r) {
 			dmarc = append(dmarc, r)
 		}
 	}
 	return dmarc, nil
+}
+
+// hasDMARCVersion reports whether a TXT record is a DMARC record, i.e. its first
+// tag is the version tag "v=DMARC1". RFC 7489 §6.3 requires v to be the first
+// tag with a value that "MUST match precisely"; §6.4 gives the ABNF
+// dmarc-version = "v" *WSP "=" *WSP "DMARC1", with tags separated by
+// dmarc-sep = *WSP ";" *WSP.
+//
+// The match is deliberately neither a raw prefix nor an exact string compare:
+//
+//   - The value is a complete token, so "v=DMARC10" and "v=DMARC1x" — distinct,
+//     longer tokens — are NOT DMARC records (the old strings.HasPrefix accepted
+//     them).
+//   - Whitespace is tolerated around "=" and before the separator, and the tag
+//     name and value are compared case-insensitively (tag names are
+//     case-insensitive per §6.4, and "DMARC1" is matched case-insensitively by
+//     convention), so ABNF-legal forms such as "V=DMARC1 ; p=none" and
+//     "v = DMARC1" ARE DMARC records (the old prefix compare rejected them).
+//
+// The version tag MUST be first: a "v=DMARC1" appearing after another tag does
+// not qualify, since only the first ";"-delimited field is inspected.
+func hasDMARCVersion(record string) bool {
+	first, _, _ := strings.Cut(record, ";")
+	name, value, found := strings.Cut(first, "=")
+	if !found {
+		return false
+	}
+	name = strings.TrimSpace(name)
+	value = strings.TrimSpace(value)
+	return strings.EqualFold(name, "v") && strings.EqualFold(value, "DMARC1")
 }
 
 // ParsePolicy extracts the requested policy (the p= tag) from a DMARC record.

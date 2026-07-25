@@ -252,4 +252,45 @@ func TestLookup(t *testing.T) {
 			t.Errorf("expected the transient error to propagate, got %v", err)
 		}
 	})
+
+	// Issue #13: the v=DMARC1 version tag must match as a complete token per
+	// RFC 7489 §6.3 (v is the first tag and its value is exactly "DMARC1") and
+	// the §6.4 ABNF (dmarc-version = "v" *WSP "=" *WSP "DMARC1"). A raw prefix
+	// match was simultaneously too lax and too strict: it accepted "v=DMARC10"
+	// (a distinct, longer token) as a DMARC record, and rejected ABNF-legal
+	// forms with whitespace around "=" and a case-insensitive tag name/value.
+	// Both defects are exercised in this one test.
+	t.Run("version tag matches DMARC1 as a complete token (issue #13)", func(t *testing.T) {
+		cases := []struct {
+			name   string
+			record string
+			// want is the Lookup result: the record itself when it is recognized
+			// as a DMARC record, or "" when it must be ignored as non-DMARC.
+			want string
+		}{
+			// Too lax: DMARC10 / DMARC1x are different, longer tokens, not the
+			// DMARC1 version, so a domain publishing only such a record has no
+			// policy.
+			{"rejects v=DMARC10", "v=DMARC10; p=none", ""},
+			{"rejects v=DMARC1x", "v=DMARC1x; p=none", ""},
+			// Too strict: an uppercase tag name, whitespace around "=" and before
+			// the separator, and a case-insensitive value are all ABNF-legal and
+			// must be accepted.
+			{"accepts uppercase tag with WSP before separator", "V=DMARC1 ; p=none", "V=DMARC1 ; p=none"},
+			{"accepts whitespace around =", "v = DMARC1; p=none", "v = DMARC1; p=none"},
+			{"accepts case-insensitive value", "v=dmarc1; p=none", "v=dmarc1; p=none"},
+		}
+		for _, c := range cases {
+			t.Run(c.name, func(t *testing.T) {
+				resolver := func(string) ([]string, error) { return []string{c.record}, nil }
+				rec, err := Lookup("example.test", resolver)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if rec != c.want {
+					t.Errorf("Lookup with record %q = %q, want %q", c.record, rec, c.want)
+				}
+			})
+		}
+	})
 }
