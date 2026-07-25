@@ -1,6 +1,7 @@
 package dmarc
 
 import (
+	"errors"
 	"net"
 	"strings"
 )
@@ -11,15 +12,32 @@ import (
 type TXTResolver func(name string) ([]string, error)
 
 // Lookup fetches and returns the raw DMARC record published at
-// _dmarc.<domain>. It returns ("", nil) when the domain publishes no DMARC
-// record (this is not an error: DMARC simply does not apply), and ("", err)
-// when the underlying TXT lookup fails.
+// _dmarc.<domain>. It maps DNS outcomes to the three RFC 7489 §6.6.3 cases:
+//
+//   - Record found: the raw "v=DMARC1..." TXT record and a nil error.
+//   - No DMARC policy: ("", nil). This covers both a name that exists but
+//     carries no v=DMARC1 record and a name that does not exist at all — a
+//     not-found (NXDOMAIN) result is "DMARC does not apply", not a failure.
+//   - Transient failure (SERVFAIL, timeout, and other non-not-found DNS
+//     errors): ("", err). Callers must treat this as temperror and not fail
+//     open — the domain's policy is unknown, not absent.
+//
+// The distinction relies on the resolver reporting not-found via a
+// *net.DNSError whose IsNotFound is set, which is what [net.LookupTXT] does;
+// fakes returning such an error are classified the same way.
 func Lookup(domain string, resolver TXTResolver) (string, error) {
 	if resolver == nil {
 		resolver = net.LookupTXT
 	}
 	records, err := resolver("_dmarc." + domain)
 	if err != nil {
+		// A not-found result means the domain publishes no DMARC record, which
+		// RFC 7489 §6.6.3 treats as "no policy", not a lookup failure. Only
+		// genuine transient errors surface to the caller.
+		var dnsErr *net.DNSError
+		if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
+			return "", nil
+		}
 		return "", err
 	}
 	for _, r := range records {

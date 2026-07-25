@@ -2,6 +2,7 @@ package dmarc
 
 import (
 	"errors"
+	"net"
 	"testing"
 )
 
@@ -103,6 +104,50 @@ func TestDiscover(t *testing.T) {
 		resolver := func(string) ([]string, error) { return nil, wantErr }
 		if _, err := Discover("sub.example.test", resolver, nil); !errors.Is(err, wantErr) {
 			t.Errorf("expected resolver error to propagate, got %v", err)
+		}
+	})
+
+	// Issue #8: an NXDOMAIN at every name (the usual case for a domain with no
+	// DMARC anywhere) must be reported as "no policy", not an error, all the way
+	// through the org-domain fallback.
+	t.Run("NXDOMAIN everywhere is no policy, not an error", func(t *testing.T) {
+		nx := func(string) ([]string, error) {
+			return nil, &net.DNSError{Err: "no such host", IsNotFound: true}
+		}
+		p, err := Discover("sub.nodmarc.test", nx, nil)
+		if err != nil {
+			t.Fatalf("NXDOMAIN must not surface as an error: %v", err)
+		}
+		if p.Record != "" || p.ViaOrgDomain || p.Requested != "none" {
+			t.Errorf("got %+v, want empty record / Requested=none", p)
+		}
+	})
+
+	// An NXDOMAIN on the exact subdomain must not short-circuit discovery: the
+	// org-domain fallback (issue #5 / PR #17) still has to run and apply sp=.
+	t.Run("NXDOMAIN subdomain still falls back to org and applies sp=", func(t *testing.T) {
+		resolver := func(name string) ([]string, error) {
+			if name == "_dmarc.example.test" {
+				return []string{"v=DMARC1; p=reject; sp=quarantine"}, nil
+			}
+			return nil, &net.DNSError{Err: "no such host", IsNotFound: true}
+		}
+		p, err := Discover("sub.example.test", resolver, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !p.ViaOrgDomain || p.Domain != "example.test" || p.Requested != "quarantine" {
+			t.Errorf("got %+v, want fallback to example.test with Requested=quarantine", p)
+		}
+	})
+
+	// A transient failure must not be swallowed by the fallback: it has to
+	// propagate so the caller can retry instead of failing open.
+	t.Run("transient DNS failure propagates through discovery", func(t *testing.T) {
+		tempErr := &net.DNSError{Err: "server misbehaving", IsTemporary: true}
+		resolver := func(string) ([]string, error) { return nil, tempErr }
+		if _, err := Discover("sub.example.test", resolver, nil); !errors.Is(err, tempErr) {
+			t.Errorf("expected transient error to propagate, got %v", err)
 		}
 	})
 
