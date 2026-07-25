@@ -16,7 +16,10 @@ func Example() {
 	// policy with dmarc.Discover("example.com", nil, nil) (which also handles the
 	// organizational-domain fallback for subdomains); a literal keeps this DNS-free.
 	record := "v=DMARC1; p=reject; adkim=r; aspf=r; rua=mailto:agg@example.com"
-	policy := dmarc.ParsePolicy(record) // requested policy for failures
+	policy, err := dmarc.ParsePolicy(record) // requested policy for failures
+	if err != nil {
+		panic(err) // a malformed or duplicated p= value is an unusable record
+	}
 
 	// SPF authenticated the envelope sender's domain, but it is an unrelated
 	// bulk-sender domain that does not align with the From domain.

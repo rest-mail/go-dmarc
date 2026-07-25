@@ -16,9 +16,41 @@ func TestParsePolicy(t *testing.T) {
 		{"", "none"},
 	}
 	for _, c := range cases {
-		if got := ParsePolicy(c.record); got != c.want {
+		got, err := ParsePolicy(c.record)
+		if err != nil {
+			t.Errorf("ParsePolicy(%q) unexpected error: %v", c.record, err)
+			continue
+		}
+		if got != c.want {
 			t.Errorf("ParsePolicy(%q) = %q, want %q", c.record, got, c.want)
 		}
+	}
+}
+
+// Issue #15: a p= value outside the RFC 7489 §6.3 set none/quarantine/reject,
+// or a record that carries p= more than once, is malformed. ParsePolicy must
+// reject it with an error instead of returning the raw value ("bogus") or a
+// first-wins pick from the duplicate — either of which a caller would apply as
+// the disposition. §6.6.3 treats a record with no valid p as if none were
+// published, which the caller effects by declining to use it.
+func TestParsePolicyRejectsInvalid(t *testing.T) {
+	rejected := []string{
+		"v=DMARC1; p=bogus",              // unrecognised value, previously returned raw
+		"v=DMARC1; p=rejct",              // typo of a real value is still invalid
+		"v=DMARC1; p=",                   // empty value
+		"v=DMARC1; p=none; p=reject",     // duplicate p= (first-wins previously)
+		"v=DMARC1; p=reject; p=reject",   // duplicate even with identical values
+		"v=DMARC1; P=none; p=quarantine", // duplicate is case-insensitive on the tag name
+	}
+	for _, record := range rejected {
+		if got, err := ParsePolicy(record); err == nil {
+			t.Errorf("ParsePolicy(%q) = %q, nil; want an invalid/duplicate error", record, got)
+		}
+	}
+
+	// A valid value must still parse cleanly (the fix must not over-reject).
+	if got, err := ParsePolicy("v=DMARC1; p=reject"); err != nil || got != "reject" {
+		t.Errorf("ParsePolicy(valid p=reject) = %q, %v; want reject, nil", got, err)
 	}
 }
 
@@ -41,7 +73,12 @@ func TestParsePolicyCaseInsensitive(t *testing.T) {
 		{"v=DMARC1; sp=reject", "none"},          // sp= is not p=; default none
 	}
 	for _, c := range cases {
-		if got := ParsePolicy(c.record); got != c.want {
+		got, err := ParsePolicy(c.record)
+		if err != nil {
+			t.Errorf("ParsePolicy(%q) unexpected error: %v", c.record, err)
+			continue
+		}
+		if got != c.want {
 			t.Errorf("ParsePolicy(%q) = %q, want %q", c.record, got, c.want)
 		}
 	}

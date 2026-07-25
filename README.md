@@ -28,7 +28,9 @@ likes; a reporter later hands a slice of neutral `AggregateRecord` values to
   RFC 7489 §6.6.3 organizational-domain fallback (a subdomain with no record of
   its own inherits the org domain's `sp=`/`p=`) and exposes the record's `pct=`
   sampling rate on `Policy.Pct`; `Lookup` fetches a single `_dmarc.<domain>` TXT
-  record, `ParsePolicy` reads its `p=` tag, and `ParsePct` reads its `pct=` tag
+  record, `ParsePolicy` reads its `p=` tag (validated against
+  `none`/`quarantine`/`reject`; an unrecognised or duplicated value is a
+  malformed record, not a raw pass-through), and `ParsePct` reads its `pct=` tag
   (0–100, default 100) so a staged rollout can be applied to a sample of failing
   messages rather than always at 100% (§6.6.4).
 - **Identifier alignment** — `Aligned` implements DMARC relaxed alignment
@@ -72,7 +74,10 @@ func main() {
 	// policy with dmarc.Discover("example.com", nil, nil) (which also handles the
 	// organizational-domain fallback for subdomains); a literal keeps this DNS-free.
 	record := "v=DMARC1; p=reject; adkim=r; aspf=r; rua=mailto:agg@example.com"
-	policy := dmarc.ParsePolicy(record) // "none" | "quarantine" | "reject"
+	policy, err := dmarc.ParsePolicy(record) // "none" | "quarantine" | "reject"
+	if err != nil {
+		panic(err) // a malformed or duplicated p= value is an unusable record
+	}
 
 	// SPF authenticated the envelope sender's domain, but it is an unrelated
 	// bulk-sender domain that does not align with the From domain.

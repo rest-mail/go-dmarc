@@ -37,8 +37,31 @@ func TestParseSubdomainPolicyCaseInsensitive(t *testing.T) {
 		{"v=DMARC1; p=reject; sp=none", "none"},             // lowercase still works
 	}
 	for _, c := range cases {
-		if got := parseSubdomainPolicy(c.record); got != c.want {
+		got, err := parseSubdomainPolicy(c.record)
+		if err != nil {
+			t.Errorf("parseSubdomainPolicy(%q) unexpected error: %v", c.record, err)
+			continue
+		}
+		if got != c.want {
 			t.Errorf("parseSubdomainPolicy(%q) = %q, want %q", c.record, got, c.want)
+		}
+	}
+}
+
+// Issue #15: an sp= value outside none/quarantine/reject, or a duplicated sp=,
+// is malformed and must be rejected rather than returned raw (RFC 7489
+// §6.3/§6.6.3). When sp= is absent the subdomain policy is the record's p=, so a
+// malformed p= surfaces through parseSubdomainPolicy as well.
+func TestParseSubdomainPolicyRejectsInvalid(t *testing.T) {
+	rejected := []string{
+		"v=DMARC1; p=reject; sp=bogus",           // unrecognised sp= value
+		"v=DMARC1; p=reject; sp=none; sp=reject", // duplicate sp=
+		"v=DMARC1; p=bogus",                      // no sp= -> falls back to a malformed p=
+		"v=DMARC1; p=none; p=reject",             // no sp= -> falls back to a duplicated p=
+	}
+	for _, record := range rejected {
+		if got, err := parseSubdomainPolicy(record); err == nil {
+			t.Errorf("parseSubdomainPolicy(%q) = %q, nil; want an invalid/duplicate error", record, got)
 		}
 	}
 }
@@ -156,6 +179,33 @@ func TestDiscover(t *testing.T) {
 		}
 		if _, err := Discover("example.test", resolver, nil); err == nil {
 			t.Error("expected an out-of-range pct to surface as an error")
+		}
+	})
+
+	// Issue #15: an exact record with an invalid or duplicated p= is malformed,
+	// so discovery rejects it rather than adopting the raw "bogus" disposition or
+	// a first-wins pick — the same treatment Discover already gives a malformed
+	// pct=.
+	t.Run("invalid p= at the exact domain is rejected", func(t *testing.T) {
+		for _, record := range []string{"v=DMARC1; p=bogus", "v=DMARC1; p=none; p=reject"} {
+			resolver := func(string) ([]string, error) { return []string{record}, nil }
+			if p, err := Discover("example.test", resolver, nil); err == nil {
+				t.Errorf("Discover with record %q = %+v, nil; want an invalid-policy error", record, p)
+			}
+		}
+	})
+
+	// An org-domain record reached through the fallback with an invalid sp= (the
+	// tag that governs the subdomain) is likewise rejected.
+	t.Run("invalid sp= at the org domain is rejected", func(t *testing.T) {
+		resolver := func(name string) ([]string, error) {
+			if name == "_dmarc.example.test" {
+				return []string{"v=DMARC1; p=reject; sp=bogus"}, nil
+			}
+			return nil, nil
+		}
+		if p, err := Discover("sub.example.test", resolver, nil); err == nil {
+			t.Errorf("Discover = %+v, nil; want an invalid-sp error", p)
 		}
 	})
 
