@@ -3,6 +3,7 @@ package dmarc
 import (
 	"errors"
 	"net"
+	"strings"
 	"testing"
 )
 
@@ -32,10 +33,80 @@ func TestAligned(t *testing.T) {
 		{"example.test", "mail.example.test", true}, // from is subdomain of auth
 		{"evil.test", "example.test", false},        // unrelated
 		{"notexample.test", "example.test", false},  // suffix but not a subdomain boundary
+
+		// Issue #9: relaxed alignment compares Organizational Domains
+		// (RFC 7489 §3.1), not raw suffixes.
+		//
+		// Fail-closed defect: sibling subdomains that share an organizational
+		// domain must align. A naive suffix test rejects these (neither is a
+		// suffix of the other), quarantining legitimate ESP mail.
+		{"em.example.test", "mail.example.test", true}, // siblings share example.test
+		{"mail.example.test", "em.example.test", true}, // symmetric
+		{"a.b.example.test", "c.d.example.test", true}, // deeper siblings
+		// Fail-open defect: an authenticated domain that is itself a public
+		// suffix (the RFC's own d=<TLD> counter-example) must never align with a
+		// From domain registered under it.
+		{"test", "mail.example.test", false}, // d=test (TLD) never aligns
+		{"mail.example.test", "test", false}, // symmetric
+		// Lookalike domains sharing a textual suffix but not a label boundary or
+		// organizational domain must not align.
+		{"evil-example.test", "example.test", false},    // hyphenated lookalike
+		{"notexample.test", "mail.example.test", false}, // different org domain
 	}
 	for _, c := range cases {
 		if got := Aligned(c.auth, c.from); got != c.want {
 			t.Errorf("Aligned(%q, %q) = %v, want %v", c.auth, c.from, got, c.want)
+		}
+	}
+}
+
+// TestAlignedOrg exercises the injectable public-suffix hook. The registry-free
+// DefaultOrgDomain used by Aligned cannot see multi-label public suffixes such
+// as co.uk (it would treat "co.uk" itself as an organizational domain), so a
+// PSL-backed OrgDomainFunc is required to get those cases right. Callers plug in
+// golang.org/x/net/publicsuffix; the test uses an equivalent minimal fake to
+// keep the package dependency-free.
+func TestAlignedOrg(t *testing.T) {
+	// fakePSL mimics a PSL-backed OrgDomainFunc: it returns the registrable
+	// domain (public suffix + one label) or "" when the input is itself a
+	// public suffix. It knows co.uk is a two-label public suffix.
+	fakePSL := func(domain string) string {
+		domain = strings.ToLower(strings.TrimSuffix(domain, "."))
+		labels := strings.Split(domain, ".")
+		for _, suf := range []string{"co.uk", "uk", "com", "test"} { // longest first
+			sl := strings.Split(suf, ".")
+			if len(labels) < len(sl) {
+				continue
+			}
+			if strings.Join(labels[len(labels)-len(sl):], ".") == suf {
+				if len(labels) == len(sl) {
+					return "" // domain is itself a public suffix
+				}
+				return strings.Join(labels[len(labels)-len(sl)-1:], ".")
+			}
+		}
+		return DefaultOrgDomain(domain)
+	}
+
+	cases := []struct {
+		auth, from string
+		org        OrgDomainFunc
+		want       bool
+	}{
+		// Multi-label public suffix: only a shared registrable domain aligns.
+		{"a.example.co.uk", "b.example.co.uk", fakePSL, true}, // siblings under co.uk
+		{"example.co.uk", "sub.example.co.uk", fakePSL, true}, // parent/child
+		{"foo.co.uk", "co.uk", fakePSL, false},                // issue #9 fail-open: *.co.uk vs co.uk
+		{"foo.co.uk", "bar.co.uk", fakePSL, false},            // different registrable domains
+		{"com", "mail.example.com", fakePSL, false},           // d=com never aligns (RFC counter-example)
+		{"co.uk", "com", fakePSL, false},                      // two public suffixes never align
+		// A nil hook falls back to DefaultOrgDomain (same as Aligned).
+		{"em.example.test", "mail.example.test", nil, true}, // siblings via default heuristic
+		{"test", "mail.example.test", nil, false},           // public suffix via default heuristic
+	}
+	for _, c := range cases {
+		if got := AlignedOrg(c.auth, c.from, c.org); got != c.want {
+			t.Errorf("AlignedOrg(%q, %q, org) = %v, want %v", c.auth, c.from, got, c.want)
 		}
 	}
 }
