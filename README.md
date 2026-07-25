@@ -34,7 +34,10 @@ likes; a reporter later hands a slice of neutral `AggregateRecord` values to
   (0–100, default 100) so a staged rollout can be applied to a sample of failing
   messages rather than always at 100% (§6.6.4).
 - **Identifier alignment** — `Aligned` implements DMARC relaxed alignment
-  (RFC 7489 §3.1) between an authenticated domain and the From domain.
+  (RFC 7489 §3.1) between an authenticated domain and the From domain, and
+  `AlignedMode` honours a record's `adkim=`/`aspf=` mode (`ParseADKIM`/
+  `ParseASPF`, also on `Policy.ADKIM`/`Policy.ASPF`) so strict alignment
+  (§6.3, §10.4) can require an exact FQDN match.
 - **Aggregate reporting** — `AggregateRecords` groups per-message evaluations
   into report rows, `BuildReport` marshals the RFC 7489 aggregate-report XML, and
   `Gzip` compresses it for the `application/gzip` attachment (§7.2.1).

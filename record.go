@@ -204,6 +204,32 @@ func ParsePolicy(record string) (string, error) {
 	return value, nil
 }
 
+// ParseADKIM returns the DKIM identifier-alignment mode requested by a DMARC
+// record's adkim= tag (RFC 7489 §6.3): [AlignmentStrict] for a value of "s",
+// otherwise [AlignmentRelaxed]. Relaxed is the default, applied when the tag is
+// absent or carries any value other than "s" — an unknown value degrades to the
+// default rather than being rejected. The tag name and value are matched
+// case-insensitively and whitespace around "=" is tolerated, per the §6.4 ABNF.
+func ParseADKIM(record string) AlignmentMode {
+	return parseAlignmentMode(record, "adkim")
+}
+
+// ParseASPF returns the SPF identifier-alignment mode requested by a DMARC
+// record's aspf= tag; it is [ParseADKIM] for the aspf= tag (RFC 7489 §6.3).
+func ParseASPF(record string) AlignmentMode {
+	return parseAlignmentMode(record, "aspf")
+}
+
+// parseAlignmentMode reads the named alignment tag (adkim/aspf) and maps "s"
+// (case-insensitive) to strict; every other case — absent tag, "r", or an
+// unknown value — is the relaxed default.
+func parseAlignmentMode(record, name string) AlignmentMode {
+	if value, ok := tagValue(record, name); ok && strings.EqualFold(value, "s") {
+		return AlignmentStrict
+	}
+	return AlignmentRelaxed
+}
+
 // ParsePct extracts the pct= tag from a DMARC record: the percentage (0–100) of
 // failing messages to which the requested policy is applied during a staged
 // rollout (RFC 7489 §6.3). It returns the default of 100 when the record carries
