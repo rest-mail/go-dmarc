@@ -2,7 +2,9 @@ package dmarc
 
 import (
 	"errors"
+	"fmt"
 	"net"
+	"strconv"
 	"strings"
 )
 
@@ -58,6 +60,37 @@ func ParsePolicy(record string) string {
 		}
 	}
 	return "none"
+}
+
+// ParsePct extracts the pct= tag from a DMARC record: the percentage (0–100) of
+// failing messages to which the requested policy is applied during a staged
+// rollout (RFC 7489 §6.3). It returns the default of 100 when the record carries
+// no pct= tag, so a receiver that ignores pct still gets the correct full-
+// enforcement value.
+//
+// A pct= value that is not an integer in the range 0–100 is a malformed record
+// and is rejected with a non-nil error rather than silently coerced; a caller
+// can then treat the record as unusable instead of enforcing at an unintended
+// rate. Per §6.6.4 a receiver applies the requested policy to a random pct
+// percent of failing messages and the next-lower policy to the remainder;
+// selecting that sample from crypto/rand is the caller's responsibility.
+func ParsePct(record string) (int, error) {
+	for _, part := range strings.Split(record, ";") {
+		part = strings.TrimSpace(part)
+		if !strings.HasPrefix(part, "pct=") {
+			continue
+		}
+		value := strings.TrimSpace(strings.TrimPrefix(part, "pct="))
+		pct, err := strconv.Atoi(value)
+		if err != nil {
+			return 0, fmt.Errorf("dmarc: invalid pct=%q: %w", value, err)
+		}
+		if pct < 0 || pct > 100 {
+			return 0, fmt.Errorf("dmarc: pct=%d out of range 0-100", pct)
+		}
+		return pct, nil
+	}
+	return 100, nil
 }
 
 // Aligned reports whether an authenticated domain aligns with the From domain

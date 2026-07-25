@@ -26,8 +26,11 @@ likes; a reporter later hands a slice of neutral `AggregateRecord` values to
 
 - **Policy discovery** — `Discover` resolves a From domain's policy with the
   RFC 7489 §6.6.3 organizational-domain fallback (a subdomain with no record of
-  its own inherits the org domain's `sp=`/`p=`); `Lookup` fetches a single
-  `_dmarc.<domain>` TXT record and `ParsePolicy` reads its `p=` tag.
+  its own inherits the org domain's `sp=`/`p=`) and exposes the record's `pct=`
+  sampling rate on `Policy.Pct`; `Lookup` fetches a single `_dmarc.<domain>` TXT
+  record, `ParsePolicy` reads its `p=` tag, and `ParsePct` reads its `pct=` tag
+  (0–100, default 100) so a staged rollout can be applied to a sample of failing
+  messages rather than always at 100% (§6.6.4).
 - **Identifier alignment** — `Aligned` implements DMARC relaxed alignment
   (RFC 7489 §3.1) between an authenticated domain and the From domain.
 - **Aggregate reporting** — `AggregateRecords` groups per-message evaluations

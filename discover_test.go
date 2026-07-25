@@ -88,6 +88,57 @@ func TestDiscover(t *testing.T) {
 		}
 	})
 
+	// Issue #11: the discovered policy must carry the record's pct= so a caller
+	// can honour a staged rollout instead of enforcing at 100%. Both the exact
+	// match and the org-domain fallback expose it; an absent pct= defaults to 100.
+	t.Run("exposes pct from an exact record", func(t *testing.T) {
+		resolver := func(string) ([]string, error) {
+			return []string{"v=DMARC1; p=reject; pct=25"}, nil
+		}
+		p, err := Discover("example.test", resolver, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p.Pct != 25 {
+			t.Errorf("Pct = %d, want 25", p.Pct)
+		}
+	})
+
+	t.Run("pct defaults to 100 when absent", func(t *testing.T) {
+		p, err := Discover("example.test", orgResolver, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p.Pct != 100 {
+			t.Errorf("Pct = %d, want 100 (default)", p.Pct)
+		}
+	})
+
+	t.Run("org-domain fallback exposes pct", func(t *testing.T) {
+		resolver := func(name string) ([]string, error) {
+			if name == "_dmarc.example.test" {
+				return []string{"v=DMARC1; p=reject; sp=quarantine; pct=10"}, nil
+			}
+			return nil, nil
+		}
+		p, err := Discover("sub.example.test", resolver, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !p.ViaOrgDomain || p.Pct != 10 {
+			t.Errorf("got %+v, want fallback with Pct=10", p)
+		}
+	})
+
+	t.Run("malformed pct is rejected", func(t *testing.T) {
+		resolver := func(string) ([]string, error) {
+			return []string{"v=DMARC1; p=reject; pct=150"}, nil
+		}
+		if _, err := Discover("example.test", resolver, nil); err == nil {
+			t.Error("expected an out-of-range pct to surface as an error")
+		}
+	})
+
 	t.Run("no record anywhere", func(t *testing.T) {
 		resolver := func(string) ([]string, error) { return []string{"v=spf1 -all"}, nil }
 		p, err := Discover("sub.nodmarc.test", resolver, nil)

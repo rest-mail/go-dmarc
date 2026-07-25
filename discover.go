@@ -17,6 +17,14 @@ type Policy struct {
 	// record was found via the Organizational-Domain fallback. It is "none" when
 	// no policy applies.
 	Requested string
+	// Pct is the percentage (0–100) of failing messages to which Requested is
+	// applied for a staged rollout, from the record's pct= tag (RFC 7489 §6.3); it
+	// is 100 (the default) when the record omits pct=, and 0 for a zero Policy (no
+	// applicable record). A receiver honouring a rollout applies Requested to a
+	// random Pct percent of failing messages and the next-lower policy to the rest
+	// (§6.6.4); enforcing Requested unconditionally ignores the requested rate. It
+	// is meaningful only when Record is non-empty.
+	Pct int
 	// ViaOrgDomain reports whether the record was obtained through the §6.6.3
 	// Organizational-Domain fallback rather than an exact match on the queried
 	// domain.
@@ -69,7 +77,11 @@ func Discover(domain string, resolver TXTResolver, orgDomain OrgDomainFunc) (Pol
 		return Policy{}, err
 	}
 	if record != "" {
-		return Policy{Domain: domain, Record: record, Requested: ParsePolicy(record)}, nil
+		pct, err := ParsePct(record)
+		if err != nil {
+			return Policy{}, err
+		}
+		return Policy{Domain: domain, Record: record, Requested: ParsePolicy(record), Pct: pct}, nil
 	}
 
 	// §6.6.3: the exact-domain set is empty, so fall back to the record at the
@@ -89,10 +101,15 @@ func Discover(domain string, resolver TXTResolver, orgDomain OrgDomainFunc) (Pol
 	if orgRecord == "" {
 		return Policy{Requested: "none"}, nil
 	}
+	pct, err := ParsePct(orgRecord)
+	if err != nil {
+		return Policy{}, err
+	}
 	return Policy{
 		Domain:       org,
 		Record:       orgRecord,
 		Requested:    parseSubdomainPolicy(orgRecord),
+		Pct:          pct,
 		ViaOrgDomain: true,
 	}, nil
 }

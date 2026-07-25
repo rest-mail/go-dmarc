@@ -22,6 +22,48 @@ func TestParsePolicy(t *testing.T) {
 	}
 }
 
+// Issue #11: pct= (RFC 7489 §6.3) sets the percentage of failing messages the
+// requested policy is applied to for a staged rollout. It must be parsed and
+// exposed (default 100 when absent) so a receiver can sample rather than always
+// enforcing at 100%; a value outside 0–100, or a non-integer, is a malformed
+// record and is rejected.
+func TestParsePct(t *testing.T) {
+	valid := []struct {
+		record string
+		want   int
+	}{
+		{"v=DMARC1; p=reject; pct=25", 25},
+		{"v=DMARC1; p=quarantine; pct=0", 0}, // monitor-only staged rollout
+		{"v=DMARC1; p=reject; pct=100", 100}, // explicit full enforcement
+		{"v=DMARC1; p=reject", 100},          // absent -> default 100
+		{"v=DMARC1; p=reject; pct= 50 ", 50}, // whitespace around the value tolerated
+		{"", 100},                            // empty record -> default 100
+	}
+	for _, c := range valid {
+		got, err := ParsePct(c.record)
+		if err != nil {
+			t.Errorf("ParsePct(%q) unexpected error: %v", c.record, err)
+			continue
+		}
+		if got != c.want {
+			t.Errorf("ParsePct(%q) = %d, want %d", c.record, got, c.want)
+		}
+	}
+
+	rejected := []string{
+		"v=DMARC1; p=reject; pct=101", // above range
+		"v=DMARC1; p=reject; pct=-1",  // below range
+		"v=DMARC1; p=reject; pct=200",
+		"v=DMARC1; p=reject; pct=fifty", // non-integer
+		"v=DMARC1; p=reject; pct=",      // empty value
+	}
+	for _, record := range rejected {
+		if got, err := ParsePct(record); err == nil {
+			t.Errorf("ParsePct(%q) = %d, nil; want an out-of-range/invalid error", record, got)
+		}
+	}
+}
+
 func TestAligned(t *testing.T) {
 	cases := []struct {
 		auth, from string
