@@ -181,6 +181,38 @@ func TestLookup(t *testing.T) {
 		}
 	})
 
+	// Issue #12: RFC 7489 §6.6.3 step 5 — if more than one record at the name
+	// begins with v=DMARC1, the set is ambiguous and discarded, so the domain is
+	// treated as publishing no usable policy. Returning the first record would
+	// make the applied policy depend on non-deterministic DNS ordering.
+	t.Run("multiple DMARC records are discarded (no policy)", func(t *testing.T) {
+		resolver := func(string) ([]string, error) {
+			return []string{"v=DMARC1; p=none", "v=DMARC1; p=reject"}, nil
+		}
+		rec, err := Lookup("example.test", resolver)
+		if err != nil {
+			t.Fatalf("multiple records is no-policy, not an error: %v", err)
+		}
+		if rec != "" {
+			t.Errorf("expected empty record for an ambiguous multi-record set, got %q", rec)
+		}
+	})
+
+	// Non-DMARC TXT records at the name are ignored, so exactly one v=DMARC1
+	// record alongside unrelated TXT records is still a usable single policy.
+	t.Run("one DMARC record among non-DMARC TXT records still applies", func(t *testing.T) {
+		resolver := func(string) ([]string, error) {
+			return []string{"v=spf1 -all", "v=DMARC1; p=reject", "google-site-verification=abc"}, nil
+		}
+		rec, err := Lookup("example.test", resolver)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if rec != "v=DMARC1; p=reject" {
+			t.Errorf("got %q, want the single DMARC record", rec)
+		}
+	})
+
 	t.Run("resolver error", func(t *testing.T) {
 		wantErr := errors.New("dns timeout")
 		resolver := func(string) ([]string, error) { return nil, wantErr }
