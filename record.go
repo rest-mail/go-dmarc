@@ -61,17 +61,56 @@ func ParsePolicy(record string) string {
 }
 
 // Aligned reports whether an authenticated domain aligns with the From domain
-// under DMARC relaxed alignment (RFC 7489 §3.1): the organizational domains
-// must match. This uses the simple, registry-free rule that the two are equal
-// or one is a subdomain of the other (case-insensitive).
+// under DMARC relaxed alignment (RFC 7489 §3.1): their Organizational Domains
+// (§3.2) must be equal. Strict alignment is a plain exact match, which Aligned
+// also reports since an exact match trivially shares an organizational domain.
+//
+// Alignment is NOT a raw suffix test. Comparing organizational domains both
+// accepts alignments the RFC requires (sibling subdomains such as
+// em.example.com and mail.example.com, which share example.com) and rejects
+// ones it forbids (a lookalike like evil-example.com, or an authenticated
+// domain that is itself a public suffix — the RFC notes a DKIM signature
+// bearing d=com never yields an aligned result).
+//
+// Aligned uses the registry-free [DefaultOrgDomain] heuristic, which is correct
+// for single-label public suffixes but not multi-label ones (e.g. it treats
+// co.uk itself as an organizational domain). For full accuracy under
+// multi-label public suffixes, use [AlignedOrg] with a PSL-backed
+// [OrgDomainFunc].
 func Aligned(authDomain, fromDomain string) bool {
-	authDomain = strings.ToLower(authDomain)
-	fromDomain = strings.ToLower(fromDomain)
+	return AlignedOrg(authDomain, fromDomain, nil)
+}
+
+// AlignedOrg is [Aligned] with an injectable [OrgDomainFunc], so callers can
+// supply a Public Suffix List-backed organizational-domain derivation (a small
+// wrapper around golang.org/x/net/publicsuffix.EffectiveTLDPlusOne). A nil
+// orgDomain uses [DefaultOrgDomain]. Keeping the hook injectable is what lets
+// this package stay dependency-free while still supporting correct relaxed
+// alignment under multi-label public suffixes such as co.uk — the same hook
+// [Discover] uses for its §6.6.3 organizational-domain fallback.
+//
+// Relaxed alignment (RFC 7489 §3.1) holds when the two Organizational Domains
+// are non-empty and equal. A domain that is itself a public suffix has no
+// registrable Organizational Domain: a PSL-backed OrgDomainFunc returns "" for
+// it, so such a domain never aligns. Strict alignment (an exact,
+// case-insensitive match) is always reported, independent of the hook.
+func AlignedOrg(authDomain, fromDomain string, orgDomain OrgDomainFunc) bool {
+	authDomain = strings.ToLower(strings.TrimSuffix(authDomain, "."))
+	fromDomain = strings.ToLower(strings.TrimSuffix(fromDomain, "."))
+	if authDomain == "" || fromDomain == "" {
+		return false
+	}
+	// Strict alignment: an exact match always aligns.
 	if authDomain == fromDomain {
 		return true
 	}
-	if strings.HasSuffix(authDomain, "."+fromDomain) || strings.HasSuffix(fromDomain, "."+authDomain) {
-		return true
+	if orgDomain == nil {
+		orgDomain = DefaultOrgDomain
 	}
-	return false
+	authOrg := orgDomain(authDomain)
+	fromOrg := orgDomain(fromDomain)
+	// Relaxed alignment: the Organizational Domains must match. An empty result
+	// marks an input that is itself a public suffix (per a PSL-backed hook),
+	// which can never align.
+	return authOrg != "" && authOrg == fromOrg
 }
