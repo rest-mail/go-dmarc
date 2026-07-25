@@ -1,14 +1,14 @@
 # Changelog
 
-All notable changes to go-dmarc are documented here. This project follows
-[Semantic Versioning](https://semver.org). While the major version is `0`, a
-minor bump may include breaking changes.
+All notable changes to this project are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html). Note: pre-1.0, breaking changes may ship in a minor release.
 
 ## [Unreleased]
 
 ## [0.3.0] - 2026-07-25
 
-### BREAKING CHANGES
+### Breaking
 
 - **`ParsePolicy` now returns `(string, error)`.** A record whose `p=` (or
   `sp=`) value is not one of `none`, `quarantine`, or `reject`, or that repeats
@@ -65,7 +65,7 @@ minor bump may include breaking changes.
   enforced correctly instead of silently defaulting to `none` or slipping past a
   downstream `== "reject"` comparison.
 
-## v0.2.0
+## [0.2.0] - 2026-07-25
 
 ### Breaking
 
@@ -133,11 +133,15 @@ minor bump may include breaking changes.
 - Aggregate reports record the actual authenticating domain(s) in `auth_results`
   instead of repeating the header-From domain.
 
-## v0.1.1
+## [0.1.1] - 2026-07-23
+
+### Changed
 
 - Module renamed to `github.com/rest-mail/go-dmarc`.
 
-## v0.1.0
+## [0.1.0] - 2026-07-23
+
+### Added
 
 - Initial release: DMARC (RFC 7489) policy lookup and parsing, identifier
   alignment, and aggregate (`rua`) report XML generation, depending only on the
