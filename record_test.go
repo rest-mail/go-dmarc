@@ -102,6 +102,51 @@ func TestAligned(t *testing.T) {
 	}
 }
 
+// Issue #16: Aligned must sanitize its inputs before comparing (RFC 7489 §3.1).
+// An empty identifier means "no authenticated domain" and must never align — two
+// empty strings comparing equal would be a false DMARC pass. A single trailing
+// (root) dot denotes the same name and must be ignored. And a domain written as a
+// Unicode U-label must align with its equivalent xn-- A-label, since they are one
+// domain in two encodings; comparing raw strings would spuriously fail (or, once
+// org-domains are compared, spuriously match) on encoding form alone.
+func TestAlignedSanitizesInputs(t *testing.T) {
+	cases := []struct {
+		name       string
+		auth, from string
+		want       bool
+	}{
+		// Empty inputs are absent identifiers, never an alignment. Raw "" == ""
+		// would report aligned — a false pass on empty input.
+		{"both empty", "", "", false},
+		{"auth empty", "", "example.com", false},
+		{"from empty", "example.com", "", false},
+		{"root dot only", ".", ".", false}, // reduces to empty after trimming
+
+		// A single trailing dot is the FQDN root and denotes the same name.
+		{"trailing dot on from", "example.com", "example.com.", true},
+		{"trailing dot on auth", "example.com.", "example.com", true},
+		{"trailing dot both", "example.com.", "example.com.", true},
+		{"trailing dot relaxed", "mail.example.com.", "shop.example.com", true},
+
+		// A Unicode domain and its punycode A-label are the same domain.
+		{"u-label vs a-label", "münchen.de", "xn--mnchen-3ya.de", true},
+		{"a-label vs u-label", "xn--mnchen-3ya.de", "münchen.de", true},
+		{"u-label both", "münchen.de", "münchen.de", true},
+		{"u-label case fold", "MÜNCHEN.de", "xn--mnchen-3ya.de", true},
+		{"u-label relaxed siblings", "mail.münchen.de", "shop.münchen.de", true},
+		{"mixed encoding relaxed", "mail.xn--mnchen-3ya.de", "shop.münchen.de", true},
+		// Distinct Unicode domains still must not align.
+		{"distinct u-labels", "münchen.de", "köln.de", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := Aligned(c.auth, c.from); got != c.want {
+				t.Errorf("Aligned(%q, %q) = %v, want %v", c.auth, c.from, got, c.want)
+			}
+		})
+	}
+}
+
 // TestAlignedOrg exercises the injectable public-suffix hook. The registry-free
 // DefaultOrgDomain used by Aligned cannot see multi-label public suffixes such
 // as co.uk (it would treat "co.uk" itself as an organizational domain), so a
