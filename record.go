@@ -125,18 +125,83 @@ func tagValue(record, name string) (string, bool) {
 	return "", false
 }
 
-// ParsePolicy extracts the requested policy (the p= tag) from a DMARC record.
-// It returns "none" when no p= tag is present.
+// isPolicyValue reports whether v is one of the enumerated DMARC policy values
+// none/quarantine/reject (RFC 7489 §6.3). It expects v already trimmed and
+// lower-cased; the closed set means any other value is a malformed p=/sp= tag.
+func isPolicyValue(v string) bool {
+	switch v {
+	case "none", "quarantine", "reject":
+		return true
+	}
+	return false
+}
+
+// policyTag reads the single value of an enumerated policy tag (p= or sp=) and
+// validates it against the RFC 7489 §6.3 set none/quarantine/reject. Like
+// [tagValue] the tag name is matched case-insensitively and whitespace around
+// "=" is tolerated; the value is additionally lower-cased so the comparison
+// against the policy names is case-insensitive (§6.4). It returns:
+//
+//   - ("", false, nil) when the tag is absent, so the caller supplies its own
+//     default;
+//   - (value, true, nil) for exactly one occurrence carrying a recognised value;
+//   - ("", false, err) when the tag appears more than once (a duplicate tag is a
+//     malformed record — §6.4 tags occur at most once) or carries an
+//     unrecognised value.
+//
+// Returning an error rather than a raw or first-wins value is what stops a caller
+// from applying a garbage disposition (e.g. "bogus") or a non-deterministic pick
+// from a duplicated tag; §6.6.3 treats a record without a valid p as if none were
+// published, which the caller effects by declining to use the record.
+func policyTag(record, name string) (string, bool, error) {
+	var (
+		value string
+		count int
+	)
+	for _, part := range strings.Split(record, ";") {
+		tag, v, found := strings.Cut(part, "=")
+		if !found {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(tag), name) {
+			value = strings.ToLower(strings.TrimSpace(v))
+			count++
+		}
+	}
+	switch {
+	case count == 0:
+		return "", false, nil
+	case count > 1:
+		return "", false, fmt.Errorf("dmarc: duplicate %s= tag", name)
+	case !isPolicyValue(value):
+		return "", false, fmt.Errorf("dmarc: invalid %s=%q", name, value)
+	}
+	return value, true, nil
+}
+
+// ParsePolicy extracts the requested policy (the p= tag) from a DMARC record. It
+// returns "none" when no p= tag is present.
 //
 // The tag name and the enumerated value (none/quarantine/reject) are matched
 // case-insensitively per RFC 7489 §6.3/§6.4: "P=Reject" is recognised, and the
 // value is normalised to lower case so a downstream comparison against the
 // lower-case policy names is not defeated by a record that writes "REJECT".
-func ParsePolicy(record string) string {
-	if value, ok := tagValue(record, "p"); ok {
-		return strings.ToLower(value)
+//
+// A p= tag whose value is not one of the three enumerated values, or a record
+// that carries the p= tag more than once, is malformed: ParsePolicy returns a
+// non-nil error rather than the raw ("bogus") or first-wins value, so a caller
+// cannot apply an unintended disposition. Per §6.6.3 such a record has no valid
+// policy and is treated as if none were published; the caller effects that by
+// declining to use it.
+func ParsePolicy(record string) (string, error) {
+	value, present, err := policyTag(record, "p")
+	if err != nil {
+		return "", err
 	}
-	return "none"
+	if !present {
+		return "none", nil
+	}
+	return value, nil
 }
 
 // ParsePct extracts the pct= tag from a DMARC record: the percentage (0–100) of

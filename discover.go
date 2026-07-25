@@ -85,11 +85,15 @@ func Discover(domain string, resolver TXTResolver, orgDomain OrgDomainFunc) (Pol
 	}
 	if len(records) == 1 {
 		record := records[0]
+		requested, err := ParsePolicy(record)
+		if err != nil {
+			return Policy{}, err
+		}
 		pct, err := ParsePct(record)
 		if err != nil {
 			return Policy{}, err
 		}
-		return Policy{Domain: domain, Record: record, Requested: ParsePolicy(record), Pct: pct}, nil
+		return Policy{Domain: domain, Record: record, Requested: requested, Pct: pct}, nil
 	}
 
 	// §6.6.3 step 3: the exact-domain set is empty, so fall back to the record at
@@ -112,6 +116,10 @@ func Discover(domain string, resolver TXTResolver, orgDomain OrgDomainFunc) (Pol
 		return Policy{Requested: "none"}, nil
 	}
 	orgRecord := orgRecords[0]
+	requested, err := parseSubdomainPolicy(orgRecord)
+	if err != nil {
+		return Policy{}, err
+	}
 	pct, err := ParsePct(orgRecord)
 	if err != nil {
 		return Policy{}, err
@@ -119,7 +127,7 @@ func Discover(domain string, resolver TXTResolver, orgDomain OrgDomainFunc) (Pol
 	return Policy{
 		Domain:       org,
 		Record:       orgRecord,
-		Requested:    parseSubdomainPolicy(orgRecord),
+		Requested:    requested,
 		Pct:          pct,
 		ViaOrgDomain: true,
 	}, nil
@@ -130,9 +138,18 @@ func Discover(domain string, resolver TXTResolver, orgDomain OrgDomainFunc) (Pol
 // (RFC 7489 §6.3). It returns "none" when neither is present. Like p=, the sp=
 // tag name and its enumerated value (none/quarantine/reject) are matched
 // case-insensitively and the value is normalised to lower case.
-func parseSubdomainPolicy(record string) string {
-	if value, ok := tagValue(record, "sp"); ok {
-		return strings.ToLower(value)
+//
+// An sp= tag with an unrecognised value, or one that appears more than once, is
+// malformed and returns a non-nil error rather than a raw value (§6.6.3); when
+// sp= is absent the subdomain policy is the record's p=, so a malformed p= (see
+// [ParsePolicy]) likewise surfaces as an error.
+func parseSubdomainPolicy(record string) (string, error) {
+	value, present, err := policyTag(record, "sp")
+	if err != nil {
+		return "", err
+	}
+	if present {
+		return value, nil
 	}
 	return ParsePolicy(record)
 }
