@@ -21,8 +21,10 @@
 // RFC 7489 §6.6.3 Organizational-Domain fallback: when a subdomain publishes no
 // record of its own, it applies the organizational domain's subdomain policy
 // (the sp= tag, or p= when sp= is absent). [Lookup] is the lower-level primitive
-// that fetches the raw record at exactly _dmarc.<domain>, and [ParsePolicy]
-// reads a record's requested policy from the p= tag. [Aligned] reports whether
+// that fetches the raw record at exactly _dmarc.<domain>, [ParsePolicy] reads a
+// record's requested policy from the p= tag, and [ParsePct] reads the pct= tag
+// (0–100, default 100) so a staged rollout can be applied to a sample of failing
+// messages rather than always at 100%. [Aligned] reports whether
 // an authenticated domain — from an SPF smtp.mailfrom or a verified DKIM
 // signature's d= — aligns with the From domain:
 //
