@@ -127,13 +127,12 @@ func Discover(domain string, resolver TXTResolver, orgDomain OrgDomainFunc) (Pol
 
 // parseSubdomainPolicy returns the policy an Organizational-Domain record
 // requests for its subdomains: the sp= tag when present, otherwise the p= tag
-// (RFC 7489 §6.3). It returns "none" when neither is present.
+// (RFC 7489 §6.3). It returns "none" when neither is present. Like p=, the sp=
+// tag name and its enumerated value (none/quarantine/reject) are matched
+// case-insensitively and the value is normalised to lower case.
 func parseSubdomainPolicy(record string) string {
-	for _, part := range strings.Split(record, ";") {
-		part = strings.TrimSpace(part)
-		if strings.HasPrefix(part, "sp=") {
-			return strings.TrimPrefix(part, "sp=")
-		}
+	if value, ok := tagValue(record, "sp"); ok {
+		return strings.ToLower(value)
 	}
 	return ParsePolicy(record)
 }
