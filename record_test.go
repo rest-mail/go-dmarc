@@ -2,382 +2,339 @@ package dmarc
 
 import (
 	"errors"
+	"math"
 	"net"
-	"strings"
+	"reflect"
 	"testing"
 )
 
+// mustParse parses a record that must be valid.
+func mustParse(t testing.TB, record string) Record {
+	t.Helper()
+	r, err := ParseRecord(record)
+	if err != nil {
+		t.Fatalf("ParseRecord(%q): %v", record, err)
+	}
+	return r
+}
+
+// TestParseRecordDefaults checks the default of every tag a minimal record
+// omits.
+//
+// checklist: DMARC-REC-11 DMARC-REC-13 DMARC-REC-16 DMARC-REC-10
+func TestParseRecordDefaults(t *testing.T) {
+	got := mustParse(t, "v=DMARC1; p=reject")
+	want := Record{
+		Policy:         "reject",
+		ADKIM:          AlignmentRelaxed,
+		ASPF:           AlignmentRelaxed,
+		Pct:            100,
+		FailureOptions: []string{"0"},
+		ReportFormats:  []string{"afrf"},
+		ReportInterval: 86400,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %+v\nwant %+v", got, want)
+	}
+}
+
+// TestParseRecordVersion checks that v=DMARC1 must be the first tag, with its
+// value matched exactly, or the record is not a DMARC record.
+//
+// checklist: DMARC-REC-02 DMARC-REC-03
+func TestParseRecordVersion(t *testing.T) {
+	for _, rec := range []string{"v=DMARC1; p=none", "V=DMARC1;p=none", "v = DMARC1 ;p=none", "v=DMARC1\t; p=none"} {
+		if _, err := ParseRecord(rec); err != nil {
+			t.Errorf("ParseRecord(%q): %v", rec, err)
+		}
+	}
+	for _, rec := range []string{"", "p=none", "p=none; v=DMARC1", "v=DMARC2; p=none", "v=dmarc1; p=none",
+		"v=DMARC10; p=none", "v=DMARC; p=none", "v=spf1 -all", "v DMARC1; p=none", "vv=DMARC1; p=none"} {
+		if _, err := ParseRecord(rec); !errors.Is(err, ErrNotDMARC) {
+			t.Errorf("ParseRecord(%q) error = %v, want ErrNotDMARC", rec, err)
+		}
+	}
+}
+
+// TestParseRecordSyntax checks the tag-list syntax: whitespace around "=" and
+// ";", tags in any order after v=, an optional trailing ";", empty parts and
+// unknown tags ignored.
+//
+// checklist: DMARC-REC-05 DMARC-REC-06
+func TestParseRecordSyntax(t *testing.T) {
+	want := mustParse(t, "v=DMARC1; p=quarantine; sp=reject; adkim=s; pct=50; rua=mailto:a@example.test")
+	for _, rec := range []string{
+		"v=DMARC1;p=quarantine;sp=reject;adkim=s;pct=50;rua=mailto:a@example.test",
+		"v=DMARC1 ;  p = quarantine ;\tsp=reject; adkim =s ; pct= 50; rua=mailto:a@example.test;",
+		"v=DMARC1; rua=mailto:a@example.test; pct=50; adkim=s; sp=reject; p=quarantine",
+		"v=DMARC1; p=quarantine; ; sp=reject;; adkim=s; pct=50; rua=mailto:a@example.test; x=1; future=yes; junk",
+	} {
+		if got := mustParse(t, rec); !reflect.DeepEqual(got, want) {
+			t.Errorf("ParseRecord(%q) = %+v, want %+v", rec, got, want)
+		}
+	}
+}
+
+// TestParseRecordPolicy checks p= and sp= and the §6.6.3 step 6 rule for a
+// record without a valid policy: p=none when it names a valid rua= URI, and
+// no DMARC otherwise.
+//
+// checklist: DMARC-REC-08 DMARC-DISC-06 DMARC-DISC-07
+func TestParseRecordPolicy(t *testing.T) {
+	cases := []struct{ record, p, sp string }{
+		{"v=DMARC1; p=none", "none", ""},
+		{"v=DMARC1; p=quarantine", "quarantine", ""},
+		{"v=DMARC1; p=reject; sp=none", "reject", "none"},
+		{"v=DMARC1; p=none; sp=quarantine", "none", "quarantine"},
+		// No valid policy, but a valid rua=: read as p=none.
+		{"v=DMARC1; rua=mailto:a@example.test", "none", ""},
+		{"v=DMARC1; p=bogus; rua=mailto:a@example.test", "none", ""},
+		{"v=DMARC1; p=reject; sp=bogus; rua=mailto:a@example.test", "none", ""},
+		{"v=DMARC1; p=reject; p=reject; rua=mailto:a@example.test", "none", ""},
+		{"v=DMARC1; p=reject; sp=none; sp=none; rua=mailto:a@example.test", "none", ""},
+	}
+	for _, c := range cases {
+		r := mustParse(t, c.record)
+		if r.Policy != c.p || r.SubdomainPolicy != c.sp {
+			t.Errorf("ParseRecord(%q) p=%q sp=%q, want p=%q sp=%q", c.record, r.Policy, r.SubdomainPolicy, c.p, c.sp)
+		}
+	}
+	// No valid policy and no valid rua=: DMARC does not apply.
+	for _, rec := range []string{"v=DMARC1", "v=DMARC1;", "v=DMARC1; p=", "v=DMARC1; p=bogus", "v=DMARC1; p=rejct",
+		"v=DMARC1; p=reject; sp=bogus", "v=DMARC1; p=none; p=reject", "v=DMARC1; p=bogus; rua=nonsense",
+		"v=DMARC1; sp=reject", "v=DMARC1; p=bogus; ruf=mailto:a@example.test"} {
+		if r, err := ParseRecord(rec); !errors.Is(err, ErrNoPolicy) {
+			t.Errorf("ParseRecord(%q) = %+v, %v; want ErrNoPolicy", rec, r, err)
+		}
+	}
+}
+
+// TestParsePolicy checks the p=-only shortcut the server uses.
+//
+// checklist: DMARC-REC-08 DMARC-DISC-06 DMARC-DISC-07
 func TestParsePolicy(t *testing.T) {
 	cases := []struct{ record, want string }{
 		{"v=DMARC1; p=reject; rua=mailto:agg@example.test", "reject"},
 		{"v=DMARC1; p=quarantine; pct=50", "quarantine"},
-		{"v=DMARC1; p=none", "none"},
-		{"v=DMARC1; sp=reject", "none"}, // no p= tag -> default none
-		{"", "none"},
+		{"v=DMARC1; P=Reject", "reject"},
+		{"v=DMARC1; sp=reject; rua=mailto:agg@example.test", "none"},
 	}
 	for _, c := range cases {
-		got, err := ParsePolicy(c.record)
-		if err != nil {
-			t.Errorf("ParsePolicy(%q) unexpected error: %v", c.record, err)
-			continue
-		}
-		if got != c.want {
-			t.Errorf("ParsePolicy(%q) = %q, want %q", c.record, got, c.want)
+		if got, err := ParsePolicy(c.record); err != nil || got != c.want {
+			t.Errorf("ParsePolicy(%q) = %q, %v; want %q", c.record, got, err, c.want)
 		}
 	}
-}
-
-// Issue #15: a p= value outside the RFC 7489 §6.3 set none/quarantine/reject,
-// or a record that carries p= more than once, is malformed. ParsePolicy must
-// reject it with an error instead of returning the raw value ("bogus") or a
-// first-wins pick from the duplicate — either of which a caller would apply as
-// the disposition. §6.6.3 treats a record with no valid p as if none were
-// published, which the caller effects by declining to use it.
-func TestParsePolicyRejectsInvalid(t *testing.T) {
-	rejected := []string{
-		"v=DMARC1; p=bogus",              // unrecognised value, previously returned raw
-		"v=DMARC1; p=rejct",              // typo of a real value is still invalid
-		"v=DMARC1; p=",                   // empty value
-		"v=DMARC1; p=none; p=reject",     // duplicate p= (first-wins previously)
-		"v=DMARC1; p=reject; p=reject",   // duplicate even with identical values
-		"v=DMARC1; P=none; p=quarantine", // duplicate is case-insensitive on the tag name
-	}
-	for _, record := range rejected {
-		if got, err := ParsePolicy(record); err == nil {
-			t.Errorf("ParsePolicy(%q) = %q, nil; want an invalid/duplicate error", record, got)
-		}
-	}
-
-	// A valid value must still parse cleanly (the fix must not over-reject).
-	if got, err := ParsePolicy("v=DMARC1; p=reject"); err != nil || got != "reject" {
-		t.Errorf("ParsePolicy(valid p=reject) = %q, %v; want reject, nil", got, err)
-	}
-}
-
-// Issue #14: DMARC tag names are case-insensitive and the enumerated policy
-// values none/quarantine/reject are matched case-insensitively (RFC 7489
-// §6.3/§6.4 ABNF). A case-sensitive parser silently drops the policy of an
-// otherwise-valid record: "P=reject" fails the "p=" prefix test and defaults to
-// "none", while "p=REJECT" is returned verbatim so a downstream `== "reject"`
-// comparison misses it and the reject policy is not enforced. ParsePolicy must
-// recognise the tag regardless of case and normalise the value to lower case.
-func TestParsePolicyCaseInsensitive(t *testing.T) {
-	cases := []struct{ record, want string }{
-		{"v=DMARC1; P=reject", "reject"},         // uppercase tag name
-		{"v=DMARC1; p=REJECT", "reject"},         // uppercase value normalised
-		{"v=DMARC1; P=Reject", "reject"},         // mixed case, both
-		{"v=DMARC1; P=Quarantine", "quarantine"}, // mixed-case quarantine
-		{"v=DMARC1; P=NONE", "none"},             // uppercase none
-		{"v=dmarc1; p=reject", "reject"},         // lowercase still works
-		{"v=DMARC1; p = reject", "reject"},       // WSP around '=' per ABNF
-		{"v=DMARC1; sp=reject", "none"},          // sp= is not p=; default none
-	}
-	for _, c := range cases {
-		got, err := ParsePolicy(c.record)
-		if err != nil {
-			t.Errorf("ParsePolicy(%q) unexpected error: %v", c.record, err)
-			continue
-		}
-		if got != c.want {
-			t.Errorf("ParsePolicy(%q) = %q, want %q", c.record, got, c.want)
+	for _, rec := range []string{"", "v=DMARC1; p=bogus", "v=DMARC1; p=none; p=reject", "v=dmarc1; p=reject"} {
+		if got, err := ParsePolicy(rec); err == nil {
+			t.Errorf("ParsePolicy(%q) = %q, nil; want an error", rec, got)
 		}
 	}
 }
 
-// Issue #11: pct= (RFC 7489 §6.3) sets the percentage of failing messages the
-// requested policy is applied to for a staged rollout. It must be parsed and
-// exposed (default 100 when absent) so a receiver can sample rather than always
-// enforcing at 100%; a value outside 0–100, or a non-integer, is a malformed
-// record and is rejected.
-func TestParsePct(t *testing.T) {
-	valid := []struct {
-		record string
-		want   int
-	}{
-		{"v=DMARC1; p=reject; pct=25", 25},
-		{"v=DMARC1; p=quarantine; pct=0", 0}, // monitor-only staged rollout
-		{"v=DMARC1; p=reject; pct=100", 100}, // explicit full enforcement
-		{"v=DMARC1; p=reject", 100},          // absent -> default 100
-		{"v=DMARC1; p=reject; pct= 50 ", 50}, // whitespace around the value tolerated
-		{"v=DMARC1; p=reject; PCT=25", 25},   // issue #14: tag name is case-insensitive
-		{"", 100},                            // empty record -> default 100
+// TestParseRecordCaseInsensitive checks that tag names and the enumerated
+// values match in any case, as the ABNF's quoted strings do, while URIs keep
+// their case.
+//
+// checklist: DMARC-REC-17
+func TestParseRecordCaseInsensitive(t *testing.T) {
+	r := mustParse(t, "V=DMARC1; P=Reject; SP=QUARANTINE; ADKIM=S; Aspf=S; PCT=10; FO=D:S; RF=AFRF; RI=3600; RUF=mailto:Fail@Example.test; RUA=MailTo:Agg@Example.test!10M")
+	want := Record{
+		Policy: "reject", SubdomainPolicy: "quarantine", ADKIM: AlignmentStrict, ASPF: AlignmentStrict, Pct: 10,
+		FailureOptions: []string{"d", "s"}, ReportFormats: []string{"afrf"}, ReportInterval: 3600,
+		RUA: []ReportURI{{URI: "MailTo:Agg@Example.test", MaxSize: 10 << 20}},
+		RUF: []ReportURI{{URI: "mailto:Fail@Example.test", MaxSize: math.MaxUint64}},
 	}
-	for _, c := range valid {
-		got, err := ParsePct(c.record)
-		if err != nil {
-			t.Errorf("ParsePct(%q) unexpected error: %v", c.record, err)
-			continue
-		}
-		if got != c.want {
-			t.Errorf("ParsePct(%q) = %d, want %d", c.record, got, c.want)
-		}
-	}
-
-	rejected := []string{
-		"v=DMARC1; p=reject; pct=101", // above range
-		"v=DMARC1; p=reject; pct=-1",  // below range
-		"v=DMARC1; p=reject; pct=200",
-		"v=DMARC1; p=reject; pct=fifty", // non-integer
-		"v=DMARC1; p=reject; pct=",      // empty value
-	}
-	for _, record := range rejected {
-		if got, err := ParsePct(record); err == nil {
-			t.Errorf("ParsePct(%q) = %d, nil; want an out-of-range/invalid error", record, got)
-		}
+	if !reflect.DeepEqual(r, want) {
+		t.Errorf("got %+v\nwant %+v", r, want)
 	}
 }
 
-func TestAligned(t *testing.T) {
+// TestParseRecordAlignmentModes checks adkim= and aspf=: s is strict, r and
+// anything else relaxed.
+//
+// checklist: DMARC-REC-10 DMARC-REC-07
+func TestParseRecordAlignmentModes(t *testing.T) {
 	cases := []struct {
-		auth, from string
-		want       bool
+		record     string
+		adkim, spf AlignmentMode
 	}{
-		{"example.test", "example.test", true},      // exact
-		{"Example.Test", "example.test", true},      // case-insensitive
-		{"mail.example.test", "example.test", true}, // auth is subdomain of from
-		{"example.test", "mail.example.test", true}, // from is subdomain of auth
-		{"evil.test", "example.test", false},        // unrelated
-		{"notexample.test", "example.test", false},  // suffix but not a subdomain boundary
-
-		// Issue #9: relaxed alignment compares Organizational Domains
-		// (RFC 7489 §3.1), not raw suffixes.
-		//
-		// Fail-closed defect: sibling subdomains that share an organizational
-		// domain must align. A naive suffix test rejects these (neither is a
-		// suffix of the other), quarantining legitimate ESP mail.
-		{"em.example.test", "mail.example.test", true}, // siblings share example.test
-		{"mail.example.test", "em.example.test", true}, // symmetric
-		{"a.b.example.test", "c.d.example.test", true}, // deeper siblings
-		// Fail-open defect: an authenticated domain that is itself a public
-		// suffix (the RFC's own d=<TLD> counter-example) must never align with a
-		// From domain registered under it.
-		{"test", "mail.example.test", false}, // d=test (TLD) never aligns
-		{"mail.example.test", "test", false}, // symmetric
-		// Lookalike domains sharing a textual suffix but not a label boundary or
-		// organizational domain must not align.
-		{"evil-example.test", "example.test", false},    // hyphenated lookalike
-		{"notexample.test", "mail.example.test", false}, // different org domain
-	}
-	for _, c := range cases {
-		if got := Aligned(c.auth, c.from); got != c.want {
-			t.Errorf("Aligned(%q, %q) = %v, want %v", c.auth, c.from, got, c.want)
-		}
-	}
-}
-
-// Issue #16: Aligned must sanitize its inputs before comparing (RFC 7489 §3.1).
-// An empty identifier means "no authenticated domain" and must never align — two
-// empty strings comparing equal would be a false DMARC pass. A single trailing
-// (root) dot denotes the same name and must be ignored. And a domain written as a
-// Unicode U-label must align with its equivalent xn-- A-label, since they are one
-// domain in two encodings; comparing raw strings would spuriously fail (or, once
-// org-domains are compared, spuriously match) on encoding form alone.
-func TestAlignedSanitizesInputs(t *testing.T) {
-	cases := []struct {
-		name       string
-		auth, from string
-		want       bool
-	}{
-		// Empty inputs are absent identifiers, never an alignment. Raw "" == ""
-		// would report aligned — a false pass on empty input.
-		{"both empty", "", "", false},
-		{"auth empty", "", "example.com", false},
-		{"from empty", "example.com", "", false},
-		{"root dot only", ".", ".", false}, // reduces to empty after trimming
-
-		// A single trailing dot is the FQDN root and denotes the same name.
-		{"trailing dot on from", "example.com", "example.com.", true},
-		{"trailing dot on auth", "example.com.", "example.com", true},
-		{"trailing dot both", "example.com.", "example.com.", true},
-		{"trailing dot relaxed", "mail.example.com.", "shop.example.com", true},
-
-		// A Unicode domain and its punycode A-label are the same domain.
-		{"u-label vs a-label", "münchen.de", "xn--mnchen-3ya.de", true},
-		{"a-label vs u-label", "xn--mnchen-3ya.de", "münchen.de", true},
-		{"u-label both", "münchen.de", "münchen.de", true},
-		{"u-label case fold", "MÜNCHEN.de", "xn--mnchen-3ya.de", true},
-		{"u-label relaxed siblings", "mail.münchen.de", "shop.münchen.de", true},
-		{"mixed encoding relaxed", "mail.xn--mnchen-3ya.de", "shop.münchen.de", true},
-		// Distinct Unicode domains still must not align.
-		{"distinct u-labels", "münchen.de", "köln.de", false},
-	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			if got := Aligned(c.auth, c.from); got != c.want {
-				t.Errorf("Aligned(%q, %q) = %v, want %v", c.auth, c.from, got, c.want)
-			}
-		})
-	}
-}
-
-// TestAlignedOrg exercises the injectable public-suffix hook. The registry-free
-// DefaultOrgDomain used by Aligned cannot see multi-label public suffixes such
-// as co.uk (it would treat "co.uk" itself as an organizational domain), so a
-// PSL-backed OrgDomainFunc is required to get those cases right. Callers plug in
-// golang.org/x/net/publicsuffix; the test uses an equivalent minimal fake to
-// keep the package dependency-free.
-func TestAlignedOrg(t *testing.T) {
-	// fakePSL mimics a PSL-backed OrgDomainFunc: it returns the registrable
-	// domain (public suffix + one label) or "" when the input is itself a
-	// public suffix. It knows co.uk is a two-label public suffix.
-	fakePSL := func(domain string) string {
-		domain = strings.ToLower(strings.TrimSuffix(domain, "."))
-		labels := strings.Split(domain, ".")
-		for _, suf := range []string{"co.uk", "uk", "com", "test"} { // longest first
-			sl := strings.Split(suf, ".")
-			if len(labels) < len(sl) {
-				continue
-			}
-			if strings.Join(labels[len(labels)-len(sl):], ".") == suf {
-				if len(labels) == len(sl) {
-					return "" // domain is itself a public suffix
-				}
-				return strings.Join(labels[len(labels)-len(sl)-1:], ".")
-			}
-		}
-		return DefaultOrgDomain(domain)
-	}
-
-	cases := []struct {
-		auth, from string
-		org        OrgDomainFunc
-		want       bool
-	}{
-		// Multi-label public suffix: only a shared registrable domain aligns.
-		{"a.example.co.uk", "b.example.co.uk", fakePSL, true}, // siblings under co.uk
-		{"example.co.uk", "sub.example.co.uk", fakePSL, true}, // parent/child
-		{"foo.co.uk", "co.uk", fakePSL, false},                // issue #9 fail-open: *.co.uk vs co.uk
-		{"foo.co.uk", "bar.co.uk", fakePSL, false},            // different registrable domains
-		{"com", "mail.example.com", fakePSL, false},           // d=com never aligns (RFC counter-example)
-		{"co.uk", "com", fakePSL, false},                      // two public suffixes never align
-		// A nil hook falls back to DefaultOrgDomain (same as Aligned).
-		{"em.example.test", "mail.example.test", nil, true}, // siblings via default heuristic
-		{"test", "mail.example.test", nil, false},           // public suffix via default heuristic
-	}
-	for _, c := range cases {
-		if got := AlignedOrg(c.auth, c.from, c.org); got != c.want {
-			t.Errorf("AlignedOrg(%q, %q, org) = %v, want %v", c.auth, c.from, got, c.want)
-		}
-	}
-}
-
-// Issue #10: adkim= / aspf= (RFC 7489 §6.3) select the DKIM and SPF
-// identifier-alignment mode — "r" relaxed (the default) or "s" strict. A parser
-// that never reads the tags leaves every record relaxed, so a domain that
-// publishes strict alignment to defend against a hostile delegated subdomain
-// (§10.4) is silently given relaxed semantics. The tag name and value are
-// case-insensitive, whitespace around "=" is tolerated, and any value other than
-// "s" (including an absent tag or an unknown value) degrades to the relaxed
-// default.
-func TestParseAlignmentMode(t *testing.T) {
-	cases := []struct {
-		record      string
-		adkim, aspf AlignmentMode
-	}{
-		{"v=DMARC1; p=reject", AlignmentRelaxed, AlignmentRelaxed}, // absent -> relaxed default
+		{"v=DMARC1; p=reject", AlignmentRelaxed, AlignmentRelaxed},
 		{"v=DMARC1; p=reject; adkim=r; aspf=r", AlignmentRelaxed, AlignmentRelaxed},
-		{"v=DMARC1; p=reject; adkim=s", AlignmentStrict, AlignmentRelaxed}, // aspf still defaults relaxed
+		{"v=DMARC1; p=reject; adkim=s", AlignmentStrict, AlignmentRelaxed},
 		{"v=DMARC1; p=reject; aspf=s", AlignmentRelaxed, AlignmentStrict},
-		{"v=DMARC1; p=reject; adkim=s; aspf=s", AlignmentStrict, AlignmentStrict},
-		{"v=DMARC1; p=reject; ADKIM=S; ASPF=S", AlignmentStrict, AlignmentStrict}, // case-insensitive name and value
-		{"v=DMARC1; p=reject; adkim = s", AlignmentStrict, AlignmentRelaxed},      // WSP around '=' per ABNF
-		{"v=DMARC1; p=reject; adkim=x", AlignmentRelaxed, AlignmentRelaxed},       // unknown value -> relaxed default
-		{"", AlignmentRelaxed, AlignmentRelaxed},
+		{"v=DMARC1; p=reject; adkim = s; aspf=s", AlignmentStrict, AlignmentStrict},
+		{"v=DMARC1; p=reject; adkim=x; aspf=strict", AlignmentRelaxed, AlignmentRelaxed},
 	}
 	for _, c := range cases {
-		if got := ParseADKIM(c.record); got != c.adkim {
-			t.Errorf("ParseADKIM(%q) = %v, want %v", c.record, got, c.adkim)
-		}
-		if got := ParseASPF(c.record); got != c.aspf {
-			t.Errorf("ParseASPF(%q) = %v, want %v", c.record, got, c.aspf)
+		r := mustParse(t, c.record)
+		if r.ADKIM != c.adkim || r.ASPF != c.spf {
+			t.Errorf("ParseRecord(%q) adkim=%v aspf=%v, want %v %v", c.record, r.ADKIM, r.ASPF, c.adkim, c.spf)
 		}
 	}
 }
 
-// Issue #10: AlignedMode must honour the alignment mode. Under strict alignment
-// the identifier domain must be an exact FQDN match with the From domain, so a
-// delegated subdomain that aligns under relaxed must NOT align under strict.
-// This is the reported defect: adkim=s was ignored, so a DKIM signature with
-// d=example.com was reported aligned for a From of mail.example.com even though
-// the domain opted into strict alignment specifically to reject it.
-func TestAlignedModeStrictDKIM(t *testing.T) {
-	const record = "v=DMARC1; p=reject; adkim=s"
-	const dkimDomain = "example.com"      // DKIM d=
-	const fromDomain = "mail.example.com" // header From, a subdomain of d=
-
-	// Relaxed: the two share organizational domain example.com and align.
-	if !AlignedMode(dkimDomain, fromDomain, AlignmentRelaxed, nil) {
-		t.Fatalf("relaxed: AlignedMode(%q, %q) = false, want true (share org domain)", dkimDomain, fromDomain)
-	}
-	// Strict, parsed from adkim=s: an exact FQDN match is required, so the
-	// subdomain does not align.
-	if mode := ParseADKIM(record); AlignedMode(dkimDomain, fromDomain, mode, nil) {
-		t.Errorf("strict: AlignedMode(%q, %q, %v) = true, want false (adkim=s needs exact match)", dkimDomain, fromDomain, mode)
-	}
-	// An exact match still aligns under strict.
-	if !AlignedMode("mail.example.com", "mail.example.com", AlignmentStrict, nil) {
-		t.Errorf("strict: an exact FQDN match must align")
-	}
-}
-
-// Issue #10: aspf=s applies strict alignment to the SPF-authenticated domain.
-func TestAlignedModeStrictSPF(t *testing.T) {
-	const record = "v=DMARC1; p=reject; aspf=s"
-	const spfDomain = "bounce.example.com" // SPF-checked MAIL FROM domain
-	const fromDomain = "example.com"       // header From, parent of the SPF domain
-
-	if !AlignedMode(spfDomain, fromDomain, AlignmentRelaxed, nil) {
-		t.Fatalf("relaxed: AlignedMode(%q, %q) = false, want true (subdomain of From)", spfDomain, fromDomain)
-	}
-	if mode := ParseASPF(record); AlignedMode(spfDomain, fromDomain, mode, nil) {
-		t.Errorf("strict: AlignedMode(%q, %q, %v) = true, want false (aspf=s needs exact match)", spfDomain, fromDomain, mode)
-	}
-}
-
-// Issue #10: with no adkim/aspf tag the mode defaults to relaxed, so AlignedMode
-// is identical to Aligned/AlignedOrg — existing behaviour is unchanged for
-// records that do not opt into strict alignment.
-func TestAlignedModeDefaultRelaxed(t *testing.T) {
-	const record = "v=DMARC1; p=reject" // no adkim/aspf
-	adkim := ParseADKIM(record)         // AlignmentRelaxed
+// TestParseRecordPct checks pct=: one to three digits up to 100, or the
+// default of 100.
+//
+// checklist: DMARC-REC-11 DMARC-REC-07
+func TestParseRecordPct(t *testing.T) {
 	cases := []struct {
-		auth, from string
-		want       bool
+		value string
+		want  int
 	}{
-		{"em.example.test", "mail.example.test", true}, // siblings align under relaxed
-		{"mail.example.test", "example.test", true},    // subdomain aligns under relaxed
-		{"evil-example.test", "example.test", false},   // lookalike never aligns
+		{"25", 25}, {"0", 0}, {"100", 100}, {" 50 ", 50}, {"050", 50}, {"007", 7},
+		{"101", 100}, {"200", 100}, {"-1", 100}, {"+5", 100}, {"fifty", 100}, {"", 100}, {"0050", 100}, {"5.5", 100},
 	}
 	for _, c := range cases {
-		got := AlignedMode(c.auth, c.from, adkim, nil)
-		if got != c.want {
-			t.Errorf("AlignedMode(%q, %q, relaxed) = %v, want %v", c.auth, c.from, got, c.want)
-		}
-		if got != Aligned(c.auth, c.from) {
-			t.Errorf("AlignedMode relaxed default must equal Aligned for %q/%q", c.auth, c.from)
+		rec := "v=DMARC1; p=reject; pct=" + c.value
+		if got := mustParse(t, rec).Pct; got != c.want {
+			t.Errorf("ParseRecord(%q).Pct = %d, want %d", rec, got, c.want)
 		}
 	}
 }
 
-// Issue #10: Discover must surface the record's alignment modes so a caller that
-// only has the discovered Policy can request the right (possibly strict)
-// alignment. A zero Policy (no record) reports the relaxed default.
-func TestDiscoverExposesAlignmentMode(t *testing.T) {
-	resolver := func(string) ([]string, error) {
-		return []string{"v=DMARC1; p=reject; adkim=s; aspf=r"}, nil
+// TestParseRecordInvalidTagsDefault checks that a syntax error in an optional
+// tag takes its default and leaves the rest of the record, and the policy,
+// alone. (v0.3.0 refused such a record; a typo in pct= then switched a
+// domain's reject policy off.)
+//
+// checklist: DMARC-REC-07
+func TestParseRecordInvalidTagsDefault(t *testing.T) {
+	got := mustParse(t, "v=DMARC1; p=reject; adkim=x; aspf=; pct=150; fo=2; rf=xml; ri=-5; ruf=mailto:f@example.test")
+	want := Record{
+		Policy: "reject", ADKIM: AlignmentRelaxed, ASPF: AlignmentRelaxed, Pct: 100,
+		FailureOptions: []string{"0"}, ReportFormats: []string{"afrf"}, ReportInterval: 86400,
+		RUF: []ReportURI{{URI: "mailto:f@example.test", MaxSize: math.MaxUint64}},
 	}
-	pol, err := Discover("example.test", resolver, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if pol.ADKIM != AlignmentStrict {
-		t.Errorf("Policy.ADKIM = %v, want strict", pol.ADKIM)
-	}
-	if pol.ASPF != AlignmentRelaxed {
-		t.Errorf("Policy.ASPF = %v, want relaxed", pol.ASPF)
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %+v\nwant %+v", got, want)
 	}
 }
 
+// TestParseRecordDuplicateTags checks that a repeated tag is a syntax error:
+// its values are discarded, so a repeated optional tag takes its default and
+// a repeated p= leaves no valid policy.
+//
+// checklist: DMARC-REC-18
+func TestParseRecordDuplicateTags(t *testing.T) {
+	r := mustParse(t, "v=DMARC1; p=reject; pct=10; pct=20; adkim=s; ADKIM=s")
+	if r.Pct != 100 || r.ADKIM != AlignmentRelaxed || r.Policy != "reject" {
+		t.Errorf("got %+v, want pct 100, adkim relaxed, p reject", r)
+	}
+	if _, err := ParseRecord("v=DMARC1; p=reject; P=reject"); !errors.Is(err, ErrNoPolicy) {
+		t.Errorf("a repeated p= must leave no policy, got %v", err)
+	}
+}
+
+// TestParseRecordFailureOptions checks fo=: a colon-separated list of 0, 1, d
+// and s, "0" by default, and ignored when the record has no ruf=.
+//
+// checklist: DMARC-REC-12 DMARC-REC-13 DMARC-REC-07
+func TestParseRecordFailureOptions(t *testing.T) {
+	const ruf = "; ruf=mailto:f@example.test"
+	cases := []struct {
+		record string
+		want   []string
+	}{
+		{"v=DMARC1; p=none" + ruf, []string{"0"}},
+		{"v=DMARC1; p=none; fo=1" + ruf, []string{"1"}},
+		{"v=DMARC1; p=none; fo=0:1:d:s" + ruf, []string{"0", "1", "d", "s"}},
+		{"v=DMARC1; p=none; fo= d : s " + ruf, []string{"d", "s"}},
+		{"v=DMARC1; p=none; fo=1:x" + ruf, []string{"0"}},
+		{"v=DMARC1; p=none; fo=" + ruf, []string{"0"}},
+		{"v=DMARC1; p=none; fo=1", []string{"0"}},
+		{"v=DMARC1; p=none; fo=1; ruf=nonsense", []string{"0"}},
+	}
+	for _, c := range cases {
+		if got := mustParse(t, c.record).FailureOptions; !reflect.DeepEqual(got, c.want) {
+			t.Errorf("ParseRecord(%q).FailureOptions = %q, want %q", c.record, got, c.want)
+		}
+	}
+}
+
+// TestParseRecordReportFormats checks rf=: only the registered afrf format is
+// kept, and the default is afrf.
+//
+// checklist: DMARC-REC-14
+func TestParseRecordReportFormats(t *testing.T) {
+	for _, v := range []string{"afrf", "AFRF", "iodef:afrf", "iodef", "", "afrf:afrf"} {
+		got := mustParse(t, "v=DMARC1; p=none; rf="+v).ReportFormats
+		want := []string{"afrf"}
+		if v == "afrf:afrf" {
+			want = []string{"afrf", "afrf"}
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("rf=%s: ReportFormats = %q, want %q", v, got, want)
+		}
+	}
+}
+
+// TestParseRecordReportInterval checks ri=: an unsigned 32-bit number of
+// seconds, 86400 by default.
+//
+// checklist: DMARC-REC-16 DMARC-REC-07
+func TestParseRecordReportInterval(t *testing.T) {
+	cases := []struct {
+		value string
+		want  uint32
+	}{{"3600", 3600}, {"0", 0}, {"4294967295", 4294967295}, {"4294967296", 86400}, {"-1", 86400}, {"1h", 86400}, {"", 86400}}
+	for _, c := range cases {
+		if got := mustParse(t, "v=DMARC1; p=none; ri="+c.value).ReportInterval; got != c.want {
+			t.Errorf("ri=%s: ReportInterval = %d, want %d", c.value, got, c.want)
+		}
+	}
+}
+
+// TestParseReportURIs checks rua= and ruf=: comma-separated URIs in order,
+// each with an optional "!" size limit in powers of two, invalid ones left
+// out.
+//
+// checklist: DMARC-URI-01 DMARC-URI-02 DMARC-URI-03 DMARC-URI-04 DMARC-URI-05
+func TestParseReportURIs(t *testing.T) {
+	const max = math.MaxUint64
+	cases := []struct {
+		value string
+		want  []ReportURI
+	}{
+		{"mailto:a@example.test", []ReportURI{{"mailto:a@example.test", max}}},
+		{"mailto:a@example.test,mailto:b@example.test, mailto:c@example.test ,https://r.example.test/x",
+			[]ReportURI{{"mailto:a@example.test", max}, {"mailto:b@example.test", max}, {"mailto:c@example.test", max}, {"https://r.example.test/x", max}}},
+		{"mailto:a@example.test!100", []ReportURI{{"mailto:a@example.test", 100}}},
+		{"mailto:a@example.test!10k", []ReportURI{{"mailto:a@example.test", 10 << 10}}},
+		{"mailto:a@example.test!50m", []ReportURI{{"mailto:a@example.test", 50 << 20}}},
+		{"mailto:a@example.test!2g", []ReportURI{{"mailto:a@example.test", 2 << 30}}},
+		{"mailto:a@example.test!1T", []ReportURI{{"mailto:a@example.test", 1 << 40}}},
+		{"mailto:a@example.test!0", []ReportURI{{"mailto:a@example.test", 0}}},
+		{"mailto:a@example.test!18446744073709551615", []ReportURI{{"mailto:a@example.test", max}}},
+		{"mailto:a@example.test!18446744073709551615k", []ReportURI{{"mailto:a@example.test", max}}},
+		// A size that does not fit in 64 bits, or is not a number, makes the
+		// URI invalid, and so does an unencoded "!" in it.
+		{"mailto:a@example.test!18446744073709551616", nil},
+		{"mailto:a@example.test!", nil},
+		{"mailto:a@example.test!10x", nil},
+		{"mailto:a@example.test!k", nil},
+		{"mailto:a!b@example.test!10", nil},
+		// An encoded comma or "!" belongs to the URI.
+		{"mailto:a%2Cb@example.test,mailto:c%21d@example.test!1k",
+			[]ReportURI{{"mailto:a%2Cb@example.test", max}, {"mailto:c%21d@example.test", 1 << 10}}},
+		// Not URIs: no scheme, nothing after it, whitespace or control
+		// characters inside, a bad scheme.
+		{"a@example.test,mailto:,mailto:a b@example.test,mailto:a\x00@example.test,1x:a@example.test,,", nil},
+		{"", nil},
+	}
+	for _, c := range cases {
+		got := mustParse(t, "v=DMARC1; p=none; rua="+c.value).RUA
+		if !reflect.DeepEqual(got, c.want) {
+			t.Errorf("rua=%q: got %+v, want %+v", c.value, got, c.want)
+		}
+	}
+}
+
+// TestLookup checks the raw record lookup: non-DMARC TXT records are
+// discarded, several DMARC records are no policy, NXDOMAIN is no policy, and a
+// transient DNS error is an error.
+//
+// checklist: DMARC-DISC-03 DMARC-DISC-05 DMARC-DISC-08 DMARC-DISC-09 DMARC-REC-02 DMARC-REC-03
 func TestLookup(t *testing.T) {
 	t.Run("found", func(t *testing.T) {
 		resolver := func(name string) ([]string, error) {
@@ -480,12 +437,9 @@ func TestLookup(t *testing.T) {
 
 	// Issue #13: the v=DMARC1 version tag must match as a complete token per
 	// RFC 7489 §6.3 (v is the first tag and its value is exactly "DMARC1") and
-	// the §6.4 ABNF (dmarc-version = "v" *WSP "=" *WSP "DMARC1"). A raw prefix
-	// match was simultaneously too lax and too strict: it accepted "v=DMARC10"
-	// (a distinct, longer token) as a DMARC record, and rejected ABNF-legal
-	// forms with whitespace around "=" and a case-insensitive tag name/value.
-	// Both defects are exercised in this one test.
-	t.Run("version tag matches DMARC1 as a complete token (issue #13)", func(t *testing.T) {
+	// the §6.4 ABNF (dmarc-version = "v" *WSP "=" *WSP %x44 %x4d %x41 %x52 %x43
+	// %x31). The value is case-sensitive: §6.3 says it "MUST match precisely".
+	t.Run("version tag matches DMARC1 exactly", func(t *testing.T) {
 		cases := []struct {
 			name   string
 			record string
@@ -493,17 +447,12 @@ func TestLookup(t *testing.T) {
 			// as a DMARC record, or "" when it must be ignored as non-DMARC.
 			want string
 		}{
-			// Too lax: DMARC10 / DMARC1x are different, longer tokens, not the
-			// DMARC1 version, so a domain publishing only such a record has no
-			// policy.
 			{"rejects v=DMARC10", "v=DMARC10; p=none", ""},
 			{"rejects v=DMARC1x", "v=DMARC1x; p=none", ""},
-			// Too strict: an uppercase tag name, whitespace around "=" and before
-			// the separator, and a case-insensitive value are all ABNF-legal and
-			// must be accepted.
+			{"rejects a lower-case value", "v=dmarc1; p=none", ""},
+			{"rejects v= after another tag", "p=none; v=DMARC1", ""},
 			{"accepts uppercase tag with WSP before separator", "V=DMARC1 ; p=none", "V=DMARC1 ; p=none"},
 			{"accepts whitespace around =", "v = DMARC1; p=none", "v = DMARC1; p=none"},
-			{"accepts case-insensitive value", "v=dmarc1; p=none", "v=dmarc1; p=none"},
 		}
 		for _, c := range cases {
 			t.Run(c.name, func(t *testing.T) {
@@ -518,4 +467,48 @@ func TestLookup(t *testing.T) {
 			})
 		}
 	})
+
+	t.Run("queries the A-label form, and nothing for a non-domain", func(t *testing.T) {
+		var queried []string
+		resolver := func(name string) ([]string, error) {
+			queried = append(queried, name)
+			return nil, nil
+		}
+		for _, d := range []string{"Bücher.Example.", "", "a..b", "exa mple.test"} {
+			if rec, err := Lookup(d, resolver); rec != "" || err != nil {
+				t.Errorf("Lookup(%q) = %q, %v", d, rec, err)
+			}
+		}
+		if len(queried) != 1 || queried[0] != "_dmarc.xn--bcher-kva.example" {
+			t.Errorf("queried %q, want only _dmarc.xn--bcher-kva.example", queried)
+		}
+	})
+}
+
+// TestNilResolverUsesSystemDNS checks that a nil resolver stands for the
+// system's (net.LookupTXT), here replaced by a fake so no query leaves the
+// machine.
+//
+// checklist: DMARC-DISC-02
+func TestNilResolverUsesSystemDNS(t *testing.T) {
+	saved := systemResolver
+	defer func() { systemResolver = saved }()
+	var queried []string
+	systemResolver = func(name string) ([]string, error) {
+		queried = append(queried, name)
+		return []string{"v=DMARC1; p=reject"}, nil
+	}
+	if rec, err := Lookup("example.test", nil); err != nil || rec != "v=DMARC1; p=reject" {
+		t.Errorf("Lookup = %q, %v", rec, err)
+	}
+	if p, err := Discover("example.test", nil, nil); err != nil || p.Requested != "reject" {
+		t.Errorf("Discover = %+v, %v", p, err)
+	}
+	if got, err := AuthorizeReportURIs("example.test", "rua", uris("mailto:a@other.test"), nil, nil); err != nil || len(got) != 1 {
+		t.Errorf("AuthorizeReportURIs = %+v, %v", got, err)
+	}
+	want := []string{"_dmarc.example.test", "_dmarc.example.test", "example.test._report._dmarc.other.test"}
+	if !reflect.DeepEqual(queried, want) {
+		t.Errorf("queried %q, want %q", queried, want)
+	}
 }

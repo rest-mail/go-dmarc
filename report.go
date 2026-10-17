@@ -20,34 +20,47 @@
 // [Discover] performs full policy discovery for a From domain, including the
 // RFC 7489 §6.6.3 Organizational-Domain fallback: when a subdomain publishes no
 // record of its own, it applies the organizational domain's subdomain policy
-// (the sp= tag, or p= when sp= is absent). [Lookup] is the lower-level primitive
-// that fetches the raw record at exactly _dmarc.<domain>, [ParsePolicy] reads a
-// record's requested policy from the p= tag, and [ParsePct] reads the pct= tag
-// (0–100, default 100) so a staged rollout can be applied to a sample of failing
-// messages rather than always at 100%. [Aligned] reports whether
-// an authenticated domain — from an SPF smtp.mailfrom or a verified DKIM
-// signature's d= — aligns with the From domain:
+// (the sp= tag, or p= when sp= is absent). [ParseRecord] reads every tag of a
+// record, with defaults for those it omits or gets wrong; [Lookup] is the
+// lower-level primitive that fetches the raw record at exactly _dmarc.<domain>,
+// and [ParsePolicy] reads only a record's p=. [AlignedMode] reports whether an
+// authenticated domain — from an SPF smtp.mailfrom or a verified DKIM
+// signature's d= — aligns with the From domain under the record's adkim= or
+// aspf= mode:
 //
-//	policy, _ := dmarc.Discover("mail.example.com", nil, nil)
-//	if !dmarc.Aligned(authDomain, "mail.example.com") && policy.Requested == "reject" {
+//	policy, _ := dmarc.Discover("mail.example.com", nil, orgDomain)
+//	if !dmarc.AlignedMode(dkimDomain, "mail.example.com", policy.Record.ADKIM, orgDomain) &&
+//		policy.Requested == "reject" {
 //		// no aligned identifier passed: reject per published policy
 //	}
+//
+// The Organizational Domain needs the Public Suffix List, which this package
+// does not carry: pass an [OrgDomainFunc] backed by one (a wrapper around
+// golang.org/x/net/publicsuffix.EffectiveTLDPlusOne). With nil, the
+// two-label [DefaultOrgDomain] heuristic is used, which wrongly aligns two
+// registrants under a multi-label public suffix such as co.uk.
 //
 // # Aggregate reporting
 //
 // A reporter collects one [AggregateRecord] per evaluated message, then calls
-// [BuildReport] to marshal them into the RFC 7489 aggregate-report XML document.
-// [AggregateRecords] performs the grouping (identical rows are summed into a
-// count) and is called by [BuildReport], but is exported for callers that want
-// the grouped rows directly. [Gzip] compresses the document for delivery as the
-// application/gzip attachment RFC 7489 §7.2.1 specifies.
+// [BuildReport] to marshal them into the RFC 7489 aggregate-report XML document,
+// valid against the schema of its Appendix C; [NewPolicyPublished] describes
+// the discovered policy. [AggregateRecords] performs the grouping (identical
+// rows are summed into a count) and is called by [BuildReport], but is exported
+// for callers that want the grouped rows directly. [Gzip] compresses the
+// document for delivery as the application/gzip attachment RFC 7489 §7.2.1
+// specifies. Before sending to a rua= or ruf= address outside the domain's own
+// Organizational Domain, [AuthorizeReportURIs] checks that the destination
+// agreed to receive the reports (§7.1).
 package dmarc
 
 import (
 	"bytes"
 	"compress/gzip"
 	"encoding/xml"
+	"errors"
 	"fmt"
+	"net/netip"
 	"strings"
 )
 
@@ -70,9 +83,36 @@ type AggregateRecord struct {
 	// the message carried no signature (no <dkim> element is then emitted).
 	DKIM []DKIMAuth
 	// SPF holds the SPF authentication result(s), each carrying the checked
-	// domain (smtp.mailfrom or HELO) — never the header-From domain.
+	// domain (smtp.mailfrom or HELO) — never the header-From domain. The
+	// report schema needs at least one, so a message without one is reported
+	// with an SPF result of none for its envelope_from (or header_from)
+	// domain.
 	SPF []SPFAuth
+
+	// Reasons says why the disposition differs from the policy the domain
+	// requested, if it does: a message sampled out by pct=, or accepted from a
+	// trusted forwarder, say (RFC 7489 §6, Appendix C PolicyOverrideReason).
+	Reasons []PolicyOverrideReason
 }
+
+// PolicyOverrideReason is one reason the applied disposition differs from the
+// requested policy (RFC 7489 Appendix C). Type is one of the
+// PolicyOverride* constants; any other value is reported as "other" with the
+// value kept in the comment.
+type PolicyOverrideReason struct {
+	Type    string `xml:"type"`
+	Comment string `xml:"comment,omitempty"`
+}
+
+// The PolicyOverrideType values of RFC 7489 Appendix C.
+const (
+	PolicyOverrideForwarded        = "forwarded"
+	PolicyOverrideSampledOut       = "sampled_out"
+	PolicyOverrideTrustedForwarder = "trusted_forwarder"
+	PolicyOverrideMailingList      = "mailing_list"
+	PolicyOverrideLocalPolicy      = "local_policy"
+	PolicyOverrideOther            = "other"
+)
 
 // DKIMAuth is one DKIM signature's authentication result as reported in the
 // aggregate report's auth_results (RFC 7489 Appendix C, DKIMAuthResultType).
@@ -116,13 +156,53 @@ type DateRange struct {
 }
 
 // PolicyPublished is the DMARC record the reported-on domain published.
+// [NewPolicyPublished] fills it from a discovered [Policy].
+//
+// The Appendix C schema requires domain, p, sp, pct and fo. [BuildReport]
+// writes an empty SP as P (the policy subdomains get without sp=) and an
+// empty FO as "0" (the default); PCT is written as it is, so set it (to 100
+// when the record has no pct=). ADKIM and ASPF are "r" or "s", and are left
+// out when empty.
 type PolicyPublished struct {
 	Domain string `xml:"domain"`
 	ADKIM  string `xml:"adkim,omitempty"`
 	ASPF   string `xml:"aspf,omitempty"`
 	P      string `xml:"p"`
-	SP     string `xml:"sp,omitempty"`
-	PCT    int    `xml:"pct,omitempty"`
+	SP     string `xml:"sp"`
+	PCT    int    `xml:"pct"`
+	FO     string `xml:"fo"`
+}
+
+// NewPolicyPublished returns the policy_published element for a policy found
+// by [Discover]: the domain the record was found at and its p=, sp=, adkim=,
+// aspf=, pct= and fo= values, with defaults for those it omits.
+func NewPolicyPublished(p Policy) PolicyPublished {
+	r := p.Record
+	sp := r.SubdomainPolicy
+	if sp == "" {
+		sp = r.Policy
+	}
+	fo := strings.Join(r.FailureOptions, ":")
+	if fo == "" {
+		fo = "0"
+	}
+	return PolicyPublished{
+		Domain: p.Domain,
+		ADKIM:  alignmentLetter(r.ADKIM),
+		ASPF:   alignmentLetter(r.ASPF),
+		P:      r.Policy,
+		SP:     sp,
+		PCT:    r.Pct,
+		FO:     fo,
+	}
+}
+
+// alignmentLetter is the AlignmentType value of a mode: "s" or "r".
+func alignmentLetter(m AlignmentMode) string {
+	if m == AlignmentStrict {
+		return "s"
+	}
+	return "r"
 }
 
 // ReportRecord is one aggregated row: a source IP + evaluation + counts.
@@ -139,9 +219,10 @@ type Row struct {
 }
 
 type PolicyEvaluated struct {
-	Disposition string `xml:"disposition"`
-	DKIM        string `xml:"dkim"`
-	SPF         string `xml:"spf"`
+	Disposition string                 `xml:"disposition"`
+	DKIM        string                 `xml:"dkim"`
+	SPF         string                 `xml:"spf"`
+	Reasons     []PolicyOverrideReason `xml:"reason,omitempty"`
 }
 
 type Identifiers struct {
@@ -208,6 +289,56 @@ func normalizeSPFScope(s string) string {
 	}
 }
 
+// normalizeAlignment keeps an adkim/aspf value of r or s and drops anything
+// else, which the schema's AlignmentType does not allow.
+func normalizeAlignment(s string) string {
+	switch v := strings.ToLower(strings.TrimSpace(s)); v {
+	case "r", "s":
+		return v
+	default:
+		return ""
+	}
+}
+
+// normalizeReasons maps each reason's type to the PolicyOverrideType
+// enumeration; an unknown type becomes "other" and keeps its text in the
+// comment.
+func normalizeReasons(reasons []PolicyOverrideReason) []PolicyOverrideReason {
+	var out []PolicyOverrideReason
+	for _, r := range reasons {
+		t := strings.ToLower(strings.TrimSpace(r.Type))
+		switch t {
+		case PolicyOverrideForwarded, PolicyOverrideSampledOut, PolicyOverrideTrustedForwarder,
+			PolicyOverrideMailingList, PolicyOverrideLocalPolicy, PolicyOverrideOther:
+		default:
+			if r.Comment == "" {
+				r.Comment = r.Type
+			} else if r.Type != "" {
+				r.Comment = r.Type + ": " + r.Comment
+			}
+			t = PolicyOverrideOther
+		}
+		out = append(out, PolicyOverrideReason{Type: t, Comment: r.Comment})
+	}
+	return out
+}
+
+// reportIP writes a source IP address the way the Appendix C IPAddress
+// pattern accepts it: an IPv4 address as a dotted quad (an IPv4-mapped IPv6
+// address included), and an IPv6 address in full, as eight groups, since the
+// pattern has no "::" form. It returns false for a string that is not an IP
+// address.
+func reportIP(s string) (string, bool) {
+	ip, err := netip.ParseAddr(strings.TrimSpace(s))
+	if err != nil || ip.Zone() != "" {
+		return s, false
+	}
+	if ip = ip.Unmap(); ip.Is4() {
+		return ip.String(), true
+	}
+	return ip.StringExpanded(), true
+}
+
 func normalizeDisposition(s string) string {
 	switch v := strings.ToLower(strings.TrimSpace(s)); v {
 	case "none", "quarantine", "reject":
@@ -269,20 +400,22 @@ func dmarcSPF(checks []SPFAuth) string {
 // full set of authentication results, summing counts.
 func AggregateRecords(records []AggregateRecord) []ReportRecord {
 	type key struct {
-		sourceIP, headerFrom, envelopeFrom, disposition, dkimEval, spfEval, auth string
+		sourceIP, headerFrom, envelopeFrom, disposition, dkimEval, spfEval, auth, reasons string
 	}
 	order := []key{}
 	counts := map[key]int{}
 	rep := map[key]AggregateRecord{}
 	for _, r := range records {
+		ip, _ := reportIP(r.SourceIP)
 		k := key{
-			sourceIP:     r.SourceIP,
+			sourceIP:     ip,
 			headerFrom:   headerFrom(r),
 			envelopeFrom: envelopeFrom(r),
 			disposition:  normalizeDisposition(r.Disposition),
 			dkimEval:     dmarcDKIM(r.DKIM),
 			spfEval:      dmarcSPF(r.SPF),
 			auth:         authResultsKey(r.DKIM, r.SPF),
+			reasons:      reasonsKey(r.Reasons),
 		}
 		if _, seen := counts[k]; !seen {
 			order = append(order, k)
@@ -296,19 +429,20 @@ func AggregateRecords(records []AggregateRecord) []ReportRecord {
 		r := rep[k]
 		out = append(out, ReportRecord{
 			Row: Row{
-				SourceIP: r.SourceIP,
+				SourceIP: k.sourceIP,
 				Count:    counts[k],
 				PolicyEvaluated: PolicyEvaluated{
 					Disposition: k.disposition,
 					DKIM:        k.dkimEval,
 					SPF:         k.spfEval,
+					Reasons:     normalizeReasons(r.Reasons),
 				},
 			},
 			Identifiers: Identifiers{
 				EnvelopeFrom: k.envelopeFrom,
 				HeaderFrom:   k.headerFrom,
 			},
-			AuthResults: authResults(r.DKIM, r.SPF),
+			AuthResults: authResults(r, k.envelopeFrom, k.headerFrom),
 		})
 	}
 	return out
@@ -317,24 +451,45 @@ func AggregateRecords(records []AggregateRecord) []ReportRecord {
 // authResults maps a message's DKIM/SPF authentication results to the report
 // schema, reporting each DKIM signature's d= domain and selector and each SPF
 // check's checked domain and scope individually (RFC 7489 §7.2, Appendix C). No
-// <dkim> element is produced when the message carried no signature.
-func authResults(dkim []DKIMAuth, spf []SPFAuth) AuthResults {
+// <dkim> element is produced when the message carried no signature. The
+// schema requires an <spf> element, so a message without an SPF result gets
+// one of none for its envelope (or, failing that, header) From domain.
+func authResults(r AggregateRecord, envelopeFrom, headerFrom string) AuthResults {
 	var ar AuthResults
-	for _, d := range dkim {
+	for _, d := range r.DKIM {
 		ar.DKIM = append(ar.DKIM, DKIMResult{
 			Domain:   d.Domain,
 			Selector: d.Selector,
 			Result:   normalizeDKIMResult(d.Result),
 		})
 	}
-	for _, s := range spf {
+	for _, s := range r.SPF {
 		ar.SPF = append(ar.SPF, SPFResult{
 			Domain: s.Domain,
 			Scope:  normalizeSPFScope(s.Scope),
 			Result: normalizeSPFResult(s.Result),
 		})
 	}
+	if len(ar.SPF) == 0 {
+		domain := envelopeFrom
+		if domain == "" {
+			domain = headerFrom
+		}
+		ar.SPF = []SPFResult{{Domain: domain, Scope: "mfrom", Result: "none"}}
+	}
 	return ar
+}
+
+// reasonsKey is a comparable identity for a message's override reasons.
+func reasonsKey(reasons []PolicyOverrideReason) string {
+	var b strings.Builder
+	for _, r := range normalizeReasons(reasons) {
+		b.WriteString(r.Type)
+		b.WriteByte(0)
+		b.WriteString(r.Comment)
+		b.WriteByte(0)
+	}
+	return b.String()
 }
 
 // authResultsKey builds a comparable identity for a message's auth_results so
@@ -366,8 +521,29 @@ func authResultsKey(dkim []DKIMAuth, spf []SPFAuth) string {
 }
 
 // BuildReport assembles an RFC 7489 aggregate report XML document (with the XML
-// declaration prepended).
+// declaration prepended) that conforms to the Appendix C schema. The policy's
+// values are normalized as [PolicyPublished] describes. It returns an error,
+// and no document, when there are no records (the schema requires one) or a
+// record's SourceIP is not an IP address.
 func BuildReport(meta ReportMetadata, policy PolicyPublished, records []AggregateRecord) ([]byte, error) {
+	if len(records) == 0 {
+		return nil, errors.New("dmarc: an aggregate report needs at least one record")
+	}
+	for _, r := range records {
+		if _, ok := reportIP(r.SourceIP); !ok {
+			return nil, fmt.Errorf("dmarc: source IP %q is not an IP address", r.SourceIP)
+		}
+	}
+	policy.P = normalizeDisposition(policy.P)
+	if policy.SP == "" {
+		policy.SP = policy.P
+	}
+	policy.SP = normalizeDisposition(policy.SP)
+	policy.ADKIM = normalizeAlignment(policy.ADKIM)
+	policy.ASPF = normalizeAlignment(policy.ASPF)
+	if policy.FO = strings.TrimSpace(policy.FO); policy.FO == "" {
+		policy.FO = "0"
+	}
 	fb := Feedback{
 		Version:         "1.0",
 		ReportMetadata:  meta,

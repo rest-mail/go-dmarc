@@ -3,9 +3,14 @@ package dmarc
 import (
 	"errors"
 	"net"
+	"reflect"
+	"strings"
 	"testing"
 )
 
+// TestDefaultOrgDomain checks the registry-free two-label heuristic.
+//
+// checklist: DMARC-DISC-04
 func TestDefaultOrgDomain(t *testing.T) {
 	cases := []struct{ in, want string }{
 		{"example.test", "example.test"},
@@ -28,7 +33,9 @@ func TestDefaultOrgDomain(t *testing.T) {
 // normalised to lower case, so an org record like "v=DMARC1; p=reject;
 // SP=Quarantine" applies "quarantine" to subdomains rather than silently
 // dropping the sp= tag and falling back to p=.
-func TestParseSubdomainPolicyCaseInsensitive(t *testing.T) {
+//
+// checklist: DMARC-DISC-10 DMARC-REC-17 DMARC-REC-09
+func TestDiscoverSubdomainPolicyCaseInsensitive(t *testing.T) {
 	cases := []struct{ record, want string }{
 		{"v=DMARC1; p=reject; SP=quarantine", "quarantine"}, // uppercase tag name
 		{"v=DMARC1; p=reject; sp=QUARANTINE", "quarantine"}, // uppercase value normalised
@@ -37,35 +44,23 @@ func TestParseSubdomainPolicyCaseInsensitive(t *testing.T) {
 		{"v=DMARC1; p=reject; sp=none", "none"},             // lowercase still works
 	}
 	for _, c := range cases {
-		got, err := parseSubdomainPolicy(c.record)
-		if err != nil {
-			t.Errorf("parseSubdomainPolicy(%q) unexpected error: %v", c.record, err)
-			continue
+		resolver := func(name string) ([]string, error) {
+			if name == "_dmarc.example.test" {
+				return []string{c.record}, nil
+			}
+			return nil, nil
 		}
-		if got != c.want {
-			t.Errorf("parseSubdomainPolicy(%q) = %q, want %q", c.record, got, c.want)
-		}
-	}
-}
-
-// Issue #15: an sp= value outside none/quarantine/reject, or a duplicated sp=,
-// is malformed and must be rejected rather than returned raw (RFC 7489
-// §6.3/§6.6.3). When sp= is absent the subdomain policy is the record's p=, so a
-// malformed p= surfaces through parseSubdomainPolicy as well.
-func TestParseSubdomainPolicyRejectsInvalid(t *testing.T) {
-	rejected := []string{
-		"v=DMARC1; p=reject; sp=bogus",           // unrecognised sp= value
-		"v=DMARC1; p=reject; sp=none; sp=reject", // duplicate sp=
-		"v=DMARC1; p=bogus",                      // no sp= -> falls back to a malformed p=
-		"v=DMARC1; p=none; p=reject",             // no sp= -> falls back to a duplicated p=
-	}
-	for _, record := range rejected {
-		if got, err := parseSubdomainPolicy(record); err == nil {
-			t.Errorf("parseSubdomainPolicy(%q) = %q, nil; want an invalid/duplicate error", record, got)
+		p, err := Discover("sub.example.test", resolver, nil)
+		if err != nil || !p.ViaOrgDomain || p.Requested != c.want {
+			t.Errorf("Discover with org record %q = %+v, %v; want Requested %q", c.record, p, err, c.want)
 		}
 	}
 }
 
+// TestDiscover checks the §6.6.3 discovery walk: the exact domain, then the
+// Organizational Domain, with several records, NXDOMAIN and DNS errors.
+//
+// checklist: DMARC-DISC-02 DMARC-DISC-03 DMARC-DISC-04 DMARC-DISC-05 DMARC-DISC-08 DMARC-DISC-09 DMARC-DISC-10 DMARC-REC-09
 func TestDiscover(t *testing.T) {
 	// The organizational domain publishes a record whose subdomain policy (sp=)
 	// differs from its own policy (p=), so we can tell which one was applied.
@@ -83,7 +78,7 @@ func TestDiscover(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if p.Record == "" || p.ViaOrgDomain {
+		if p.Raw == "" || p.ViaOrgDomain {
 			t.Fatalf("expected an exact (non-fallback) match, got %+v", p)
 		}
 		if p.Domain != "example.test" {
@@ -101,7 +96,7 @@ func TestDiscover(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if p.Record == "" {
+		if p.Raw == "" {
 			t.Fatal("no policy found for subdomain: DMARC silently not applied (org-domain fallback missing)")
 		}
 		if !p.ViaOrgDomain {
@@ -142,8 +137,8 @@ func TestDiscover(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if p.Pct != 25 {
-			t.Errorf("Pct = %d, want 25", p.Pct)
+		if p.Record.Pct != 25 {
+			t.Errorf("Pct = %d, want 25", p.Record.Pct)
 		}
 	})
 
@@ -152,8 +147,8 @@ func TestDiscover(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if p.Pct != 100 {
-			t.Errorf("Pct = %d, want 100 (default)", p.Pct)
+		if p.Record.Pct != 100 {
+			t.Errorf("Pct = %d, want 100 (default)", p.Record.Pct)
 		}
 	})
 
@@ -168,44 +163,31 @@ func TestDiscover(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !p.ViaOrgDomain || p.Pct != 10 {
+		if !p.ViaOrgDomain || p.Record.Pct != 10 {
 			t.Errorf("got %+v, want fallback with Pct=10", p)
 		}
 	})
 
-	t.Run("malformed pct is rejected", func(t *testing.T) {
+	// v0.3.0 refused the record; §6.3 says a syntax error in an optional tag
+	// takes the default instead, so the reject policy stays in force.
+	t.Run("malformed pct takes the default", func(t *testing.T) {
 		resolver := func(string) ([]string, error) {
 			return []string{"v=DMARC1; p=reject; pct=150"}, nil
 		}
-		if _, err := Discover("example.test", resolver, nil); err == nil {
-			t.Error("expected an out-of-range pct to surface as an error")
+		p, err := Discover("example.test", resolver, nil)
+		if err != nil || p.Requested != "reject" || p.Record.Pct != 100 {
+			t.Errorf("Discover = %+v, %v; want reject at pct 100", p, err)
 		}
 	})
 
-	// Issue #15: an exact record with an invalid or duplicated p= is malformed,
-	// so discovery rejects it rather than adopting the raw "bogus" disposition or
-	// a first-wins pick — the same treatment Discover already gives a malformed
-	// pct=.
-	t.Run("invalid p= at the exact domain is rejected", func(t *testing.T) {
-		for _, record := range []string{"v=DMARC1; p=bogus", "v=DMARC1; p=none; p=reject"} {
-			resolver := func(string) ([]string, error) { return []string{record}, nil }
-			if p, err := Discover("example.test", resolver, nil); err == nil {
-				t.Errorf("Discover with record %q = %+v, nil; want an invalid-policy error", record, p)
-			}
+	// The record says how its alignment modes are to be applied.
+	t.Run("exposes the alignment modes", func(t *testing.T) {
+		resolver := func(string) ([]string, error) {
+			return []string{"v=DMARC1; p=reject; adkim=s; aspf=r"}, nil
 		}
-	})
-
-	// An org-domain record reached through the fallback with an invalid sp= (the
-	// tag that governs the subdomain) is likewise rejected.
-	t.Run("invalid sp= at the org domain is rejected", func(t *testing.T) {
-		resolver := func(name string) ([]string, error) {
-			if name == "_dmarc.example.test" {
-				return []string{"v=DMARC1; p=reject; sp=bogus"}, nil
-			}
-			return nil, nil
-		}
-		if p, err := Discover("sub.example.test", resolver, nil); err == nil {
-			t.Errorf("Discover = %+v, nil; want an invalid-sp error", p)
+		p, err := Discover("example.test", resolver, nil)
+		if err != nil || p.Record.ADKIM != AlignmentStrict || p.Record.ASPF != AlignmentRelaxed {
+			t.Errorf("Discover = %+v, %v; want adkim strict, aspf relaxed", p, err)
 		}
 	})
 
@@ -215,7 +197,7 @@ func TestDiscover(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if p.Record != "" || p.ViaOrgDomain || p.Requested != "none" {
+		if p.Raw != "" || p.ViaOrgDomain || p.Requested != "none" {
 			t.Errorf("got %+v, want empty record / Requested=none", p)
 		}
 	})
@@ -240,7 +222,7 @@ func TestDiscover(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ambiguous multi-record set is no-policy, not an error: %v", err)
 		}
-		if p.Record != "" || p.ViaOrgDomain || p.Requested != "none" {
+		if p.Raw != "" || p.ViaOrgDomain || p.Requested != "none" {
 			t.Errorf("got %+v, want empty record / Requested=none / no org fallback", p)
 		}
 	})
@@ -258,7 +240,7 @@ func TestDiscover(t *testing.T) {
 		if err != nil {
 			t.Fatalf("ambiguous org-domain set is no-policy, not an error: %v", err)
 		}
-		if p.Record != "" || p.ViaOrgDomain || p.Requested != "none" {
+		if p.Raw != "" || p.ViaOrgDomain || p.Requested != "none" {
 			t.Errorf("got %+v, want empty record / Requested=none", p)
 		}
 	})
@@ -282,7 +264,7 @@ func TestDiscover(t *testing.T) {
 		if err != nil {
 			t.Fatalf("NXDOMAIN must not surface as an error: %v", err)
 		}
-		if p.Record != "" || p.ViaOrgDomain || p.Requested != "none" {
+		if p.Raw != "" || p.ViaOrgDomain || p.Requested != "none" {
 			t.Errorf("got %+v, want empty record / Requested=none", p)
 		}
 	})
@@ -333,4 +315,99 @@ func TestDiscover(t *testing.T) {
 			t.Errorf("got %+v, want fallback to example.co.test with Requested=reject", p)
 		}
 	})
+}
+
+// TestDiscoverInvalidPolicy checks §6.6.3 step 6: a record with no valid p=,
+// or an invalid sp=, requests "none" when it names a valid rua= URI, so
+// reports still flow, and leaves DMARC unapplied otherwise. Neither is an
+// error (v0.3.0 returned one, which a caller could not tell from a DNS
+// failure).
+//
+// checklist: DMARC-DISC-06 DMARC-DISC-07
+func TestDiscoverInvalidPolicy(t *testing.T) {
+	cases := []struct {
+		domain, record string
+		applies        bool
+	}{
+		{"example.test", "v=DMARC1; p=bogus; rua=mailto:agg@example.test", true},
+		{"example.test", "v=DMARC1; p=reject; sp=bogus; rua=mailto:agg@example.test", true},
+		{"example.test", "v=DMARC1; rua=mailto:agg@example.test", true},
+		{"sub.example.test", "v=DMARC1; p=reject; sp=bogus; rua=mailto:agg@example.test", true},
+		{"example.test", "v=DMARC1; p=bogus", false},
+		{"example.test", "v=DMARC1; p=none; p=reject", false},
+		{"sub.example.test", "v=DMARC1; p=reject; sp=bogus", false},
+	}
+	for _, c := range cases {
+		resolver := func(name string) ([]string, error) {
+			if name == "_dmarc.example.test" {
+				return []string{c.record}, nil
+			}
+			return nil, nil
+		}
+		p, err := Discover(c.domain, resolver, nil)
+		if err != nil || p.Requested != "none" || (p.Raw != "") != c.applies {
+			t.Errorf("Discover(%q) with %q = %+v, %v; want Requested none, applies %v", c.domain, c.record, p, err, c.applies)
+		}
+		if c.applies && len(p.Record.RUA) != 1 {
+			t.Errorf("Discover(%q) with %q lost the rua= URI: %+v", c.domain, c.record, p.Record)
+		}
+	}
+}
+
+// TestDiscoverDomainForm checks that the From domain is queried as an A-label,
+// lower case and without the root dot, that the org-domain hook gets the same
+// form, and that a string that is not a domain sends no query.
+//
+// checklist: DMARC-DISC-01
+func TestDiscoverDomainForm(t *testing.T) {
+	var queried, hooked []string
+	resolver := func(name string) ([]string, error) {
+		queried = append(queried, name)
+		return nil, nil
+	}
+	org := func(d string) string {
+		hooked = append(hooked, d)
+		return DefaultOrgDomain(d)
+	}
+	if p, err := Discover("Mail.Bücher.Example.", resolver, org); err != nil || p.Raw != "" {
+		t.Fatalf("Discover = %+v, %v", p, err)
+	}
+	want := []string{"_dmarc.mail.xn--bcher-kva.example", "_dmarc.xn--bcher-kva.example"}
+	if !reflect.DeepEqual(queried, want) || !reflect.DeepEqual(hooked, []string{"mail.xn--bcher-kva.example"}) {
+		t.Errorf("queried %q (hook got %q), want %q", queried, hooked, want)
+	}
+
+	queried = nil
+	for _, d := range []string{"", ".", "..", "a..example.test", "exa mple.test", "a@example.test", strings.Repeat("a", 64) + ".test"} {
+		if p, err := Discover(d, resolver, nil); err != nil || p.Raw != "" || p.Requested != "none" {
+			t.Errorf("Discover(%q) = %+v, %v", d, p, err)
+		}
+	}
+	if len(queried) != 0 {
+		t.Errorf("queried %q for non-domains", queried)
+	}
+
+	// An org-domain hook that returns nonsense, or "" for a public suffix,
+	// stops the walk at the exact domain.
+	for _, bad := range []string{"", "not a domain", "a..b"} {
+		queried = nil
+		if p, err := Discover("sub.example.test", resolver, func(string) string { return bad }); err != nil || p.Raw != "" {
+			t.Errorf("hook %q: Discover = %+v, %v", bad, p, err)
+		}
+		if len(queried) != 1 {
+			t.Errorf("hook %q: queried %q, want only the exact domain", bad, queried)
+		}
+	}
+
+	// A transient error at the org domain is returned too.
+	tempErr := errors.New("timeout")
+	r := func(name string) ([]string, error) {
+		if name == "_dmarc.example.test" {
+			return nil, tempErr
+		}
+		return nil, nil
+	}
+	if _, err := Discover("sub.example.test", r, nil); !errors.Is(err, tempErr) {
+		t.Errorf("org-domain error = %v, want %v", err, tempErr)
+	}
 }

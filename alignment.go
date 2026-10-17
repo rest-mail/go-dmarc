@@ -4,6 +4,7 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // Aligned reports whether an authenticated domain aligns with the From domain
@@ -47,7 +48,8 @@ func Aligned(authDomain, fromDomain string) bool {
 //
 //   - An empty identifier means "no authenticated domain" and must never align.
 //     Two empty inputs would trivially compare equal and yield a false DMARC
-//     pass, so an empty input on either side returns false up front.
+//     pass, so an empty input on either side returns false up front. So does
+//     an input that is not a DNS name at all (".." or "a b", say).
 //   - A fully-qualified name carrying the root dot ("example.com.") denotes the
 //     same domain as "example.com" and must align with it.
 //   - The same domain written as a Unicode U-label and as its xn-- A-label is one
@@ -61,11 +63,12 @@ func Aligned(authDomain, fromDomain string) bool {
 // it, so such a domain never aligns. Strict alignment (an exact,
 // case-insensitive match) is always reported, independent of the hook.
 func AlignedOrg(authDomain, fromDomain string, orgDomain OrgDomainFunc) bool {
-	authDomain = normalizeDomain(authDomain)
-	fromDomain = normalizeDomain(fromDomain)
-	// An empty input is an absent identifier, not a domain; it can never align
-	// (and two empties must not compare equal into a false pass).
-	if authDomain == "" || fromDomain == "" {
+	authDomain, authOK := queryDomain(authDomain)
+	fromDomain, fromOK := queryDomain(fromDomain)
+	// An empty input is an absent identifier, not a domain, and a string that
+	// is not a DNS name was not authenticated; neither can ever align (and two
+	// empties must not compare equal into a false pass).
+	if !authOK || !fromOK {
 		return false
 	}
 	// Strict alignment: an exact match always aligns.
@@ -75,12 +78,12 @@ func AlignedOrg(authDomain, fromDomain string, orgDomain OrgDomainFunc) bool {
 	if orgDomain == nil {
 		orgDomain = DefaultOrgDomain
 	}
-	authOrg := orgDomain(authDomain)
-	fromOrg := orgDomain(fromDomain)
+	authOrg, authOK := queryDomain(orgDomain(authDomain))
+	fromOrg, fromOK := queryDomain(orgDomain(fromDomain))
 	// Relaxed alignment: the Organizational Domains must match. An empty result
 	// marks an input that is itself a public suffix (per a PSL-backed hook),
 	// which can never align.
-	return authOrg != "" && authOrg == fromOrg
+	return authOK && fromOK && authOrg == fromOrg
 }
 
 // AlignmentMode is the DMARC identifier-alignment mode a record requests through
@@ -136,9 +139,39 @@ func AlignedMode(authDomain, fromDomain string, mode AlignmentMode, orgDomain Or
 	// delegated subdomain of the From domain does not align. An empty (absent)
 	// identifier never aligns, and two empties must not compare equal into a
 	// false pass.
-	authDomain = normalizeDomain(authDomain)
-	fromDomain = normalizeDomain(fromDomain)
-	return authDomain != "" && authDomain == fromDomain
+	authDomain, authOK := queryDomain(authDomain)
+	fromDomain, fromOK := queryDomain(fromDomain)
+	return authOK && fromOK && authDomain == fromDomain
+}
+
+// queryDomain returns the A-label form of a domain (see [normalizeDomain]) and
+// whether it is a DNS name a DMARC check can use: 1 to 253 characters of
+// dot-separated labels, each 1 to 63 letters, digits, hyphens or underscores.
+// Anything else (an empty string, a leading or doubled dot, a space) is not a
+// domain: it has no policy to look up and never aligns.
+func queryDomain(domain string) (string, bool) {
+	// Punycode encoding takes time quadratic in a label's length, and every
+	// code point needs at least one character of the A-label, so a name of
+	// more than 254 code points (253 and a root dot) cannot be a domain and is
+	// refused before it is encoded.
+	if utf8.RuneCountInString(domain) > 254 {
+		return "", false
+	}
+	domain = normalizeDomain(domain)
+	if domain == "" || len(domain) > 253 {
+		return "", false
+	}
+	for _, label := range strings.Split(domain, ".") {
+		if label == "" || len(label) > 63 {
+			return "", false
+		}
+		for i := 0; i < len(label); i++ {
+			if !isLDHU(label[i]) {
+				return "", false
+			}
+		}
+	}
+	return domain, true
 }
 
 // normalizeDomain canonicalizes a domain name for alignment comparison. It
@@ -176,18 +209,21 @@ func normalizeDomain(domain string) string {
 
 // labelToASCII returns the ASCII A-label form of a single DNS label. An all-ASCII
 // label (including an already-encoded xn-- label) is returned unchanged; a label
-// containing non-ASCII runes is punycode-encoded and given the xn-- prefix. If
-// encoding is not possible the (lower-cased) input is returned unchanged, so a
-// pathological label degrades to a plain non-match rather than a panic.
+// containing non-ASCII runes is punycode-encoded and given the xn-- prefix.
 func labelToASCII(label string) string {
-	if isASCII(label) {
+	// An A-label has at most 63 characters, at least one per code point, so a
+	// longer label is left as it is (and is then no valid domain); this also
+	// bounds the quadratic encoder.
+	if isASCII(label) || utf8.RuneCountInString(label) > 63 {
 		return label
 	}
-	encoded, ok := punycodeEncode(label)
-	if !ok {
-		return label
-	}
-	return "xn--" + encoded
+	return "xn--" + punycodeEncode(label)
+}
+
+// isLDHU reports whether c is a lower-case letter, a digit, a hyphen or an
+// underscore: the characters of a lower-cased DNS label.
+func isLDHU(c byte) bool {
+	return c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-' || c == '_'
 }
 
 func isASCII(s string) bool {
@@ -213,10 +249,10 @@ const (
 
 // punycodeEncode encodes a string of Unicode code points into its punycode
 // (RFC 3492) basic-string form, i.e. the part that follows the xn-- prefix in an
-// IDNA A-label. It returns ok=false only if an internal counter would overflow,
-// which cannot happen for real domain labels. This is the RFC 3492 reference
-// "Encoding procedure" adapted to Go.
-func punycodeEncode(input string) (string, bool) {
+// IDNA A-label. This is the RFC 3492 reference "Encoding procedure" adapted to
+// Go. Its input is at most 63 code points (see labelToASCII), so delta stays
+// below 64 * 0x110000 and cannot overflow, which the reference code checks.
+func punycodeEncode(input string) string {
 	runes := []rune(input)
 	var out strings.Builder
 
@@ -244,19 +280,12 @@ func punycodeEncode(input string) (string, bool) {
 				m = int(r)
 			}
 		}
-		// delta += (m - n) * (handled + 1), guarding against overflow.
-		if m-n > (math.MaxInt32-delta)/(handled+1) {
-			return "", false
-		}
 		delta += (m - n) * (handled + 1)
 		n = m
 		for _, r := range runes {
 			c := int(r)
 			if c < n {
 				delta++
-				if delta < 0 {
-					return "", false
-				}
 			}
 			if c == n {
 				q := delta
@@ -277,7 +306,7 @@ func punycodeEncode(input string) (string, bool) {
 		delta++
 		n++
 	}
-	return out.String(), true
+	return out.String()
 }
 
 func punyThreshold(k, bias int) int {
