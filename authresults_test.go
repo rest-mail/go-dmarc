@@ -9,6 +9,8 @@ import (
 // auth_results section must report the DKIM signature's d= domain and the
 // SPF-checked domain, not the header-From domain, and must report every DKIM
 // signature (RFC 7489 §7.2, Appendix C).
+//
+// checklist: DMARC-AGG-02 DMARC-DISC-12
 func TestAuthResults_ReportsAuthenticatingDomains(t *testing.T) {
 	rec := AggregateRecord{
 		Domain:      "example.test", // header-From / reported-on domain
@@ -60,6 +62,8 @@ func TestAuthResults_ReportsAuthenticatingDomains(t *testing.T) {
 
 // TestAuthResults_OmitsDKIMWhenUnsigned checks that an unsigned message produces
 // no <dkim> element at all (RFC 7489 Appendix C: dkim is minOccurs="0").
+//
+// checklist: DMARC-XML-05
 func TestAuthResults_OmitsDKIMWhenUnsigned(t *testing.T) {
 	rec := AggregateRecord{
 		Domain: "example.test", SourceIP: "192.0.2.2", HeaderFrom: "example.test", Disposition: "none",

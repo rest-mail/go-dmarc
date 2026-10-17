@@ -3,6 +3,7 @@ package dmarc_test
 import (
 	"bytes"
 	"fmt"
+	"math"
 
 	"github.com/rest-mail/go-dmarc"
 )
@@ -95,4 +96,23 @@ func Example_aggregateReport() {
 		bytes.Count(xmlBytes, []byte("<record>")),
 		len(gz) > 0)
 	// Output: xml=true rows=1 gzipped=true
+}
+
+// ExampleParseRecord reads every tag of a record, here RFC 7489 Appendix
+// B.2.4's: the omitted tags take their defaults, and the second report URI
+// carries its 10 MiB size limit.
+func ExampleParseRecord() {
+	rec, err := dmarc.ParseRecord("v=DMARC1; p=quarantine; rua=mailto:dmarc-feedback@example.com," +
+		"mailto:tld-test@thirdparty.example.net!10m; pct=25")
+	if err != nil {
+		panic(err) // not a DMARC record, or one with no usable policy
+	}
+	fmt.Println(rec.Policy, rec.Pct, rec.ADKIM, rec.ReportInterval)
+	for _, u := range rec.RUA {
+		fmt.Println(u.URI, u.MaxSize == math.MaxUint64, u.MaxSize)
+	}
+	// Output:
+	// quarantine 25 relaxed 86400
+	// mailto:dmarc-feedback@example.com true 18446744073709551615
+	// mailto:tld-test@thirdparty.example.net false 10485760
 }
