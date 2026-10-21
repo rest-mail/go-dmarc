@@ -48,6 +48,10 @@ differ.
 
 ### Added
 
+- DNS wire tests for RFC 7489 TXT character-string joining through the real
+  Go resolver, including record boundaries, organizational fallback and
+  external report authorization. The checklist now maps 66 of 95 requirements
+  to tests (29 remain n/a).
 - Three more RFC 7489 checklist rows proved by tests, taking the checklist
   to 65/95 mapped: a record with no usable `rua=` yields no aggregate report
   destination (DMARC-URI-08); `rua=` URIs keep their published order and size
