@@ -69,24 +69,24 @@ func TestRFC7489TXTCharacterStrings(t *testing.T) {
 			t.Fatalf("AuthorizeReportURIs = %+v, %v; want joined override with 2048-byte limit", got, err)
 		}
 	})
-}
 
-func TestWireTXTResolverSearchNames(t *testing.T) {
-	const record = "v=DMARC1; p=reject"
-	useWireTXTResolver(t, map[string][][]string{
-		"_dmarc.example.test.": {{"v=DMARC1; ", "p=reject"}},
+	t.Run("resolver search names", func(t *testing.T) {
+		const record = "v=DMARC1; p=reject"
+		useWireTXTResolver(t, map[string][][]string{
+			"_dmarc.example.test.": {{"v=DMARC1; ", "p=reject"}},
+		})
+		// A system resolver may append its search suffix after a NODATA answer.
+		// Query such a name explicitly so this check does not depend on resolv.conf.
+		_, err := net.LookupTXT("_dmarc.example.test.search.invalid.")
+		var dnsErr *net.DNSError
+		if !errors.As(err, &dnsErr) || !dnsErr.IsNotFound {
+			t.Fatalf("search name lookup = %v; want DNS not-found error", err)
+		}
+		got, err := Lookup("example.test", nil)
+		if err != nil || got != record {
+			t.Fatalf("Lookup = %q, %v; want %q", got, err, record)
+		}
 	})
-	// A system resolver may append its search suffix after a NODATA answer.
-	// Query such a name explicitly so this check does not depend on resolv.conf.
-	_, err := net.LookupTXT("_dmarc.example.test.search.invalid.")
-	var dnsErr *net.DNSError
-	if !errors.As(err, &dnsErr) || !dnsErr.IsNotFound {
-		t.Fatalf("search name lookup = %v; want DNS not-found error", err)
-	}
-	got, err := Lookup("example.test", nil)
-	if err != nil || got != record {
-		t.Fatalf("Lookup = %q, %v; want %q", got, err, record)
-	}
 }
 
 // useWireTXTResolver keeps the production nil-resolver path (net.LookupTXT)
@@ -155,7 +155,7 @@ func answerWireTXT(conn net.Conn, zone map[string][][]string) error {
 		Questions: request.Questions,
 	}
 	if !ok {
-		response.Header.RCode = dnsmessage.RCodeNameError
+		response.RCode = dnsmessage.RCodeNameError
 	}
 	for _, fragments := range records {
 		response.Answers = append(response.Answers, dnsmessage.Resource{

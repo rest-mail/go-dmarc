@@ -76,7 +76,7 @@ records. Custom `TXTResolver` implementations must preserve that contract.
 | DMARC-URI-05 | 6.2 | MUST | Support at least two report URIs. | `TestParseReportURIs`, `TestRFC7489RecordExamples` |
 | DMARC-URI-06 | 6.3 | MUST | Implement mailto: report URIs, i.e. sending reports by mail. | n/a: the library sends no mail. It parses mailto: URIs and finds their host for §7.1 (DMARC-EXT-01); the caller sends. |
 | DMARC-URI-07 | 6.3 | MUST | Ignore report URIs the receiver does not support. | n/a: the caller knows which schemes it sends to; the library keeps every valid URI. |
-| DMARC-URI-08 | 6.3 | MUST NOT | Generate aggregate reports for a domain whose record has no rua=. | n/a: the caller decides whom to report to; Record.RUA is empty for such a record. |
+| DMARC-URI-08 | 6.3 | MUST NOT | Generate aggregate reports for a domain whose record has no rua=. | `TestNoRUANoAggregateDestinations` |
 | DMARC-URI-09 | 6.3 | MUST NOT | Generate failure reports for a domain whose record has no ruf=. | n/a: the library generates no failure reports. |
 
 ## Policy discovery (§6.6.1 to §6.6.3)
@@ -93,7 +93,7 @@ records. Custom `TXTResolver` implementations must preserve that contract.
 | DMARC-DISC-08 | 6.6.3 | SHOULD NOT | Apply DMARC when no record exists; a name that does not exist is no policy, not an error. | `TestDiscover`, `TestLookup` |
 | DMARC-DISC-09 | 6.6.3 | Normative | DNS errors are the receiver's to handle: they are returned, apart from no policy, so it can fail open or closed. | `TestDiscover`, `TestLookup` |
 | DMARC-DISC-10 | 6.3, 6.6.3 | Normative | A record found at the Organizational Domain gives a subdomain its sp= (or p=). | `TestDiscover`, `TestDiscoverSubdomainPolicyCaseInsensitive`, `TestRFC7489DiscoveryWalk` |
-| DMARC-DISC-11 | 6.6.1 | Normative | Messages with no, several or a group From domain are handled outside DMARC. | n/a: the caller extracts the From domain; the library takes one domain. |
+| DMARC-DISC-11 | 6.6.1 | Normative | Messages with no, several or a group From domain are handled outside DMARC. | `TestDiscoverWithoutOneFromDomain` |
 | DMARC-DISC-12 | 6.6.2 | MUST | DKIM results include each signature's d=, and SPF results the domain checked. | `TestAuthResults_ReportsAuthenticatingDomains` |
 | DMARC-DISC-13 | 6.6.2 | SHOULD NOT | Use heuristics such as best-guess SPF for a domain that publishes no SPF or DKIM. | n/a: the caller runs SPF and DKIM. |
 | DMARC-DISC-14 | 6.6.2 | Normative | When no aligned identifier passes and one failed temporarily, the policy cannot be applied. | n/a: the caller combines the SPF and DKIM results. |
@@ -145,7 +145,7 @@ records. Custom `TXTResolver` implementations must preserve that contract.
 | DMARC-AGG-06 | 7.2 | SHOULD | Keep reporting periods on hour boundaries (daily ones starting at 00:00 UTC). | n/a: the caller chooses the period (DateRange). |
 | DMARC-AGG-07 | 6.3 | MUST | Provide daily reports, and SHOULD hourly ones when ri= asks. | n/a: scheduling is the caller's; Record.ReportInterval is the requested interval. |
 | DMARC-AGG-08 | 7.2.1 | SHOULD | Use a secure transport. | n/a: the library sends nothing. |
-| DMARC-AGG-09 | 7.2.1 | MUST | Try the URIs in order, skip those whose size limit the report exceeds, and attempt every other one. | n/a: the library sends nothing; Record.RUA keeps the published order and each URI's MaxSize. |
+| DMARC-AGG-09 | 7.2.1 | MUST | Try the URIs in order, skip those whose size limit the report exceeds, and attempt every other one. | `TestRUADeliveryOrderAndLimits`, `ExampleReportURI_delivery` |
 | DMARC-AGG-10 | 7.2.1, 7.2.2 | SHOULD | When no URI can take the report, send a short error report. | n/a: the library sends nothing. |
 | DMARC-AGG-11 | 7.2.1.1 | MUST | Send the report as a MIME message with the XML in one part. | n/a: the caller builds the message. |
 | DMARC-AGG-12 | 7.2.1.1 | SHOULD | Compress the XML with gzip (application/gzip). | `TestGzip_RoundTrip` |
