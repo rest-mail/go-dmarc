@@ -48,6 +48,12 @@ differ.
 
 ### Added
 
+- Three more RFC 7489 checklist rows proved by tests, taking the checklist
+  to 65/95 mapped: a record with no usable `rua=` yields no aggregate report
+  destination (DMARC-URI-08); `rua=` URIs keep their published order and size
+  limits through `AuthorizeReportURIs`, with an example of the §7.2.1 delivery
+  loop (DMARC-AGG-09); and `Discover` given no single From domain applies no
+  policy and makes no DNS query (DMARC-DISC-11).
 - README coverage-gate and RFC checklist badges, checked in CI against the
   enforced coverage minimum and the checklist's actual test mappings.
 - `AuthorizeReportURIs`, the §7.1 check that a `rua=` or `ruf=` address
