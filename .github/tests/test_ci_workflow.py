@@ -72,6 +72,12 @@ def repository_fuzz_targets():
 
 
 class CallerFixtures(unittest.TestCase):
+    def test_readme_coverage_badge_names_the_enforced_minimum(self):
+        self.assertIn(
+            '[![Coverage gate: >=95%]'
+            '(https://img.shields.io/badge/coverage%20gate-%3E%3D95%25-brightgreen)]'
+            '(COVERAGE.md)', (ROOT / 'README.md').read_text())
+
     def test_proof_is_the_pinned_go_spf_workflow(self):
         self.assertEqual(re.findall(r'^    uses: (\S+)\s*$', job('rfc'), re.M), [PRODUCER])
         workflows = [ref for ref in re.findall(r'uses:\s*(\S+)', CALLER) if '/.github/workflows/' in ref]
@@ -133,6 +139,14 @@ class ProducerContractFixtures(unittest.TestCase):
     def test_caller_passes_only_declared_inputs(self):
         passed = re.findall(r'^      ([a-z-]+):', job('rfc'), re.M)
         self.assertEqual(sorted(passed), sorted(self.declared))
+
+    def test_readme_coverage_badge_matches_the_producer_gate(self):
+        # Exercise the pinned workflow's own helper, so a changed gate cannot
+        # leave the README's minimum stale. No coverage or race suite runs.
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.proof['coverage_total']('total: (statements) 95.0%\n')
+        with self.assertRaises(ValueError):
+            self.proof['coverage_total']('total: (statements) 94.99%\n')
 
     def test_producer_accepts_inputs_and_runs_every_proof(self):
         calls = []

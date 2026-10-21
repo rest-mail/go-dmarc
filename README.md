@@ -1,6 +1,8 @@
 # go-dmarc
 
 [![CI](https://github.com/rest-mail/go-dmarc/actions/workflows/ci.yml/badge.svg)](https://github.com/rest-mail/go-dmarc/actions/workflows/ci.yml)
+[![Coverage gate: >=95%](https://img.shields.io/badge/coverage%20gate-%3E%3D95%25-brightgreen)](COVERAGE.md)
+[![Checklist: 62/95 mapped](https://img.shields.io/badge/checklist-62%2F95%20mapped-blue)](CHECKLIST.md)
 [![Go Reference](https://pkg.go.dev/badge/github.com/rest-mail/go-dmarc.svg)](https://pkg.go.dev/github.com/rest-mail/go-dmarc)
 [![Go Report Card](https://goreportcard.com/badge/github.com/rest-mail/go-dmarc)](https://goreportcard.com/report/github.com/rest-mail/go-dmarc)
 
@@ -203,6 +205,13 @@ relaxed, and the A-labels match golang.org/x/net/idna's punycode),
 report validates against the schema); CI runs each for 30 seconds. Their seeds
 are in the targets, and inputs that once failed are kept there or in
 `testdata/fuzz`.
+
+The coverage badge shows the enforced minimum; measured statement coverage
+is printed in each CI run's **Verify RFC** log. The checklist badge counts
+requirements mapped to tests over all checklist rows, including the 33
+`n/a` rows with documented reasons. CI checks the badge against the actual
+checklist and its test mappings. The CI badge reports whether verification
+passed.
 
 The RFC's own examples are tests: the records of Appendix B.2 (including the
 two report URIs and size limit of B.2.4), the alignment examples of B.1 and

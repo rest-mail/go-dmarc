@@ -48,6 +48,8 @@ differ.
 
 ### Added
 
+- README coverage-gate and RFC checklist badges, checked in CI against the
+  enforced coverage minimum and the checklist's actual test mappings.
 - `AuthorizeReportURIs`, the §7.1 check that a `rua=` or `ruf=` address
   outside the domain's Organizational Domain agreed to receive its reports
   (a `v=DMARC1` record at `<domain>._report._dmarc.<host>`), with the
