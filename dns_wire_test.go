@@ -3,6 +3,7 @@ package dmarc
 import (
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -70,9 +71,28 @@ func TestRFC7489TXTCharacterStrings(t *testing.T) {
 	})
 }
 
+func TestWireTXTResolverSearchNames(t *testing.T) {
+	const record = "v=DMARC1; p=reject"
+	useWireTXTResolver(t, map[string][][]string{
+		"_dmarc.example.test.": {{"v=DMARC1; ", "p=reject"}},
+	})
+	// A system resolver may append its search suffix after a NODATA answer.
+	// Query such a name explicitly so this check does not depend on resolv.conf.
+	_, err := net.LookupTXT("_dmarc.example.test.search.invalid.")
+	var dnsErr *net.DNSError
+	if !errors.As(err, &dnsErr) || !dnsErr.IsNotFound {
+		t.Fatalf("search name lookup = %v; want DNS not-found error", err)
+	}
+	got, err := Lookup("example.test", nil)
+	if err != nil || got != record {
+		t.Fatalf("Lookup = %q, %v; want %q", got, err, record)
+	}
+}
+
 // useWireTXTResolver keeps the production nil-resolver path (net.LookupTXT)
 // and replaces only DNS transport. net.Pipe carries length-prefixed DNS wire
-// messages, so no public DNS, host configuration or listening socket is needed.
+// messages, so no public DNS or listening socket is needed. Names outside the
+// fixture zone receive NXDOMAIN, including host-configured search suffixes.
 // These tests must remain sequential because net.DefaultResolver is global.
 func useWireTXTResolver(t *testing.T, zone map[string][][]string) {
 	t.Helper()
@@ -127,15 +147,15 @@ func answerWireTXT(conn net.Conn, zone map[string][][]string) error {
 	}
 	question := request.Questions[0]
 	records, ok := zone[question.Name.String()]
-	if !ok {
-		return fmt.Errorf("unexpected DNS name: %s", question.Name)
-	}
 	response := dnsmessage.Message{
 		Header: dnsmessage.Header{
 			ID: request.ID, Response: true, Authoritative: true,
 			RecursionDesired: request.RecursionDesired, RecursionAvailable: true,
 		},
 		Questions: request.Questions,
+	}
+	if !ok {
+		response.Header.RCode = dnsmessage.RCodeNameError
 	}
 	for _, fragments := range records {
 		response.Answers = append(response.Answers, dnsmessage.Resource{
