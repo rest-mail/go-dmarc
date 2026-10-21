@@ -42,7 +42,7 @@ differences:
 
 | ID | Section | Level | Requirement | Tests |
 |----|---------|-------|-------------|-------|
-| DMARC-REC-01 | 6.1 | MUST | Concatenate the character-strings of a TXT record, in order, before parsing it. | n/a: a TXTResolver returns each record as one string; net.LookupTXT, the default, joins the character-strings, and a resolver passed in must do the same. |
+| DMARC-REC-01 | 6.1 | MUST | Concatenate the character-strings of a TXT record, in order, before parsing it. | `TestRFC7489TXTCharacterStrings` |
 | DMARC-REC-02 | 6.3, 6.4 | MUST | v= is DMARC1, matched exactly (upper case); a record whose v= differs or is absent is ignored. | `TestParseRecordVersion`, `TestLookup` |
 | DMARC-REC-03 | 6.3 | MUST | v= is the first tag; a record that starts with another tag is ignored. | `TestParseRecordVersion`, `TestLookup` |
 | DMARC-REC-04 | 6.3, 6.4 | MUST | v and p are present and appear in that order. | n/a: a requirement on the record's publisher. A receiver taking p= only in second place would drop the policy of records such as "v=DMARC1; rua=...; p=reject", so the parser takes p= anywhere after v=, as RFC 9989 does (`TestParseRecordSyntax`). |
@@ -60,6 +60,10 @@ differences:
 | DMARC-REC-16 | 6.3, 6.4 | Normative | ri= is a 32-bit unsigned number of seconds; 86400 by default. | `TestParseRecordDefaults`, `TestParseRecordReportInterval` |
 | DMARC-REC-17 | 6.4 | Normative | Tag names and the enumerated values are case-insensitive, as the ABNF's quoted strings are. | `TestParseRecordCaseInsensitive`, `TestDiscoverSubdomainPolicyCaseInsensitive` |
 | DMARC-REC-18 | 6.3; RFC 6376 3.2 | MUST NOT | A tag appears more than once; a repeated tag is a syntax error and its values are discarded. | `TestParseRecordDuplicateTags` |
+
+DMARC-REC-01 is proved through the real `net.LookupTXT` path, with DNS wire
+responses containing several character-strings per record and several distinct
+records. Custom `TXTResolver` implementations must preserve that contract.
 
 ## Report URIs (§6.2, §6.3, §6.4)
 

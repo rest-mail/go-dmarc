@@ -48,6 +48,10 @@ differ.
 
 ### Added
 
+- DNS wire tests for RFC 7489 TXT character-string joining through the real
+  Go resolver, including record boundaries, organizational fallback and
+  external report authorization. The checklist now maps 63 of 95 requirements
+  to tests (32 remain n/a).
 - README coverage-gate and RFC checklist badges, checked in CI against the
   enforced coverage minimum and the checklist's actual test mappings.
 - `AuthorizeReportURIs`, the §7.1 check that a `rua=` or `ruf=` address
