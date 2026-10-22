@@ -45,9 +45,19 @@ differ.
 - **`PolicyPublished` always writes `sp`, `pct` and `fo`**, which the schema
   requires: an empty `SP` is written as `P`, an empty `FO` as `0`, and `PCT`
   as given (it used to be left out when 0). It gains the `FO` field.
+- **Internationalized report addresses are left out of `RUA` and `RUF`.**
+  RFC 8616 §6 says rua= and ruf= addresses are conventional, because one
+  record serves internationalized and conventional mail. A mailto: URI whose
+  address has a UTF-8 local part or a U-label domain, raw or percent-encoded,
+  is no longer a valid report URI, and neither is a URI with raw non-ASCII
+  characters (an RFC 3986 URI is ASCII) or a mailto: address with a broken
+  percent-encoding.
 
 ### Added
 
+- RFC 8616 §6 rows in `CHECKLIST.md` (DMARC-EAI-01 to -03): U-labels become
+  A-labels for discovery, alignment and §7.1 authorization, and report
+  addresses are conventional.
 - Section-by-section RFC 7489 keyword audit recorded in `CHECKLIST.md`, with
   fifteen additional obligations: From extraction, authentication checks,
   policy enforcement, independent reporting,

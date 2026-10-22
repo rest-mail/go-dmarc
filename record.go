@@ -265,7 +265,11 @@ func parseReportURIs(v string) []ReportURI {
 // parseReportURI reads one dmarc-uri = URI [ "!" 1*DIGIT [ "k" / "m" / "g" /
 // "t" ] ]. A "!" inside the URI must be percent-encoded, so the first one
 // starts the size limit. The URI must be absolute (have a scheme) and contain
-// no whitespace or control characters; the size must fit in 64 bits.
+// no whitespace, control or non-ASCII characters (an RFC 3986 URI is ASCII);
+// the size must fit in 64 bits. A mailto: URI must name conventional
+// addresses: RFC 8616 §6 says a record serves internationalized and
+// conventional mail alike, so its report addresses are never
+// internationalized, even percent-encoded.
 func parseReportURI(s string) (ReportURI, bool) {
 	raw, limit, hasLimit := strings.Cut(s, "!")
 	u := ReportURI{URI: raw, MaxSize: math.MaxUint64}
@@ -276,14 +280,34 @@ func parseReportURI(s string) (ReportURI, bool) {
 		}
 		u.MaxSize = size
 	}
-	if raw == "" || strings.ContainsFunc(raw, func(r rune) bool { return r <= ' ' || r == 0x7f }) {
+	if raw == "" || strings.ContainsFunc(raw, func(r rune) bool { return r <= ' ' || r >= 0x7f }) {
 		return ReportURI{}, false
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Scheme == "" || parsed.Opaque == "" && parsed.Host == "" && parsed.Path == "" {
 		return ReportURI{}, false
 	}
+	if strings.EqualFold(parsed.Scheme, "mailto") && !conventionalMailto(parsed.Opaque) {
+		return ReportURI{}, false
+	}
 	return u, true
+}
+
+// conventionalMailto reports whether the addresses of a mailto: URI's opaque
+// part (RFC 6068 to-field, before any "?") are all-ASCII once
+// percent-decoded, so none is an internationalized address (RFC 6531 §3.2).
+func conventionalMailto(opaque string) bool {
+	to, _, _ := strings.Cut(opaque, "?")
+	addrs, err := url.PathUnescape(to)
+	if err != nil {
+		return false
+	}
+	for i := 0; i < len(addrs); i++ {
+		if addrs[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
 }
 
 // parseSizeLimit reads 1*DIGIT [ "k" / "m" / "g" / "t" ]: a count of bytes,

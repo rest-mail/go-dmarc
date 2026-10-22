@@ -52,6 +52,7 @@ var diffRecords = []struct {
 	{"p=reject; v=DMARC1", "go-msgauth takes v= anywhere; §6.3 says it MUST be the first tag"},
 	{"v=DMARC1; p=none; p=reject", "go-msgauth lets the last of a repeated tag win; a repeated tag is a syntax error (RFC 6376 §3.2, which §6.3 adopts)"},
 	{"v=DMARC1; p=reject; pct=+5", "go-msgauth reads pct=+5 as 5; the ABNF is 1*3DIGIT, so it takes the default"},
+	{"v=DMARC1; p=none; rua=mailto:r%C3%ABports@example.com", "go-msgauth keeps an internationalized report address; RFC 8616 §6 says rua= and ruf= addresses are conventional"},
 }
 
 // TestDifferentialRecords parses each record of diffRecords with both
@@ -59,7 +60,7 @@ var diffRecords = []struct {
 // read the same values; where they diverge, the divergence is real (so the
 // list stays honest).
 //
-// checklist: DMARC-REC-06 DMARC-REC-08 DMARC-REC-10 DMARC-REC-11
+// checklist: DMARC-REC-06 DMARC-REC-08 DMARC-REC-10 DMARC-REC-11 DMARC-EAI-03
 func TestDifferentialRecords(t *testing.T) {
 	for _, c := range diffRecords {
 		mine, err := ParseRecord(c.record)

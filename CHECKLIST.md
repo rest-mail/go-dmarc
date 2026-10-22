@@ -224,3 +224,16 @@ records. Custom `TXTResolver` implementations must preserve that contract.
 | DMARC-FAIL-05 | 7.3.1 | REQUIRED | Include DKIM-Domain, DKIM-Identity and DKIM-Selector when the message was signed. | n/a: failure reports are not supported yet. |
 | DMARC-FAIL-06 | 7.3.1 | REQUIRED | Include SPF-DNS. | n/a: failure reports are not supported yet. |
 | DMARC-FAIL-07 | 6.3 | MUST | Follow the format rf= names. | n/a: failure reports are not supported yet. |
+
+## Internationalized mail (RFC 8616 §6)
+
+[RFC 8616](https://www.rfc-editor.org/rfc/rfc8616) §6 updates RFC 7489 for
+internationalized (EAI, RFC 6530) mail. Its §3 states the principle the rows
+apply: DNS stays ASCII, so a U-label in a header domain becomes an A-label
+before lookup. RFC 8616 §§4–5 update SPF and DKIM and are not DMARC's.
+
+| ID | Section | Level | Requirement | Tests |
+|----|---------|-------|-------------|-------|
+| DMARC-EAI-01 | RFC 8616 §6; 6.6.1 | Normative | Convert every U-label in the RFC5322.From domain to an A-label before further processing: policy lookup, the Organizational Domain and alignment. | `TestRFC8616ULabels` |
+| DMARC-EAI-02 | RFC 8616 §6; 7.1 | Normative | Convert every U-label in the domains §7.1 handles to an A-label, including the policy domain in `<policy domain>._report._dmarc.<host>`. | `TestRFC8616ULabels` |
+| DMARC-EAI-03 | RFC 8616 §6; 6.2 | Normative | rua= and ruf= addresses are conventional, never internationalized, because one record serves both kinds of mail: a mailto: URI naming a UTF-8 local part or a U-label domain, raw or percent-encoded, is not a valid report URI. | `TestRFC8616ConventionalReportAddresses`, `TestDifferentialRecords` |
