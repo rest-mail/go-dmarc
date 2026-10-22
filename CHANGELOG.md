@@ -48,6 +48,15 @@ differ.
 
 ### Added
 
+- Section-by-section RFC 7489 keyword audit recorded in `CHECKLIST.md`, with
+  fifteen additional obligations: From extraction, authentication checks,
+  policy enforcement, independent reporting,
+  external-verification invocation, attachment formats and delivery-error
+  fields/sizes. Fourteen are explicit caller responsibilities; the XML-file
+  requirement has a plain/gzip attachment test. A sampling regression checks
+  that all messages remain in reports at pct=0, 1, 99 and 100. Checklist and
+  README badge: 67/110 mapped, 43 n/a. Failure reports remain unsupported.
+
 - DNS wire tests for RFC 7489 TXT character-string joining through the real
   Go resolver, including record boundaries, organizational fallback and
   external report authorization. The checklist now maps 66 of 95 requirements
