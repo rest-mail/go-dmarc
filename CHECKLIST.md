@@ -1,10 +1,10 @@
 # RFC 7489 checklist
 
-Every requirement [RFC 7489](https://www.rfc-editor.org/rfc/rfc7489) places on
-a DMARC receiver (policy discovery and evaluation) and on a report generator
+An inventory of [RFC 7489](https://www.rfc-editor.org/rfc/rfc7489) requirements
+on a DMARC receiver (policy discovery and evaluation) and on a report generator
 (aggregate reports, failure reports and their destinations), item by item,
-with the tests that cover it. The list takes in every MUST, MUST NOT, SHOULD,
-SHOULD NOT, RECOMMENDED and REQUIRED that applies to a receiver or a reporter,
+with the tests that cover it. The list tracks MUST, MUST NOT, SHOULD,
+SHOULD NOT, RECOMMENDED and REQUIRED obligations on receivers and reporters,
 the MAYs the library implements, and the normative behaviour that carries no
 keyword (level "Normative"), such as the record grammar of §6.4 and the
 report schema of Appendix C. Requirements on Domain Owners publishing records
@@ -37,6 +37,34 @@ differences:
 | Report URIs | A `!` size limit is honoured (DMARC-URI-02). | The size limit is removed. |
 | Aggregate report | The Appendix C schema, no namespace (DMARC-XML-02). | A new schema in the `urn:ietf:params:xml:ns:dmarc-2.0` namespace, with `np`, `testing`, `discovery_method` and `generator`. |
 | Failure reports | Not generated (DMARC-FAIL). | Moved to RFC 9991; still not generated. |
+
+## Section audit (2026-10-22)
+
+Reviewed RFC 7489 §§1–13, including their subsections, and Appendices A–C
+against the existing rows, looking for missing receiver/reporter MUST, MUST NOT,
+SHOULD, SHOULD NOT and RECOMMENDED obligations. This records the audit scope,
+not a claim that caller-owned behavior is implemented by the library. Failure
+reports remain unsupported by owner decision; this audit adds no such feature.
+
+| Sections audited | Result |
+|------------------|--------|
+| 1; 2.1–2.4 | Introduction, goals and exclusions; no additional receiver/reporter keyword obligations. |
+| 3; 3.1–3.1.3; 3.2 | Definitions, alignment and organizational-domain algorithm; existing ALIGN/ORG rows. |
+| 4.1–4.3; 5 | Overview and From-domain selection; existing ALIGN/DISC rows. |
+| 6; 6.1–6.5 | Added POL-08 for best-effort enforcement; existing REC/URI rows cover parsing. §6.5 describes publisher actions. |
+| 6.6.1–6.6.5; 6.7 | Added DISC-16–18 for From extraction and authentication checks, and POL-09–13 for sampled-in dispositions, Authentication-Results and independent reporting. |
+| 7; 7.1 | Existing EXT rows cover the authorization algorithm. |
+| 7.2; 7.2.1; 7.2.1.1; 7.2.2 | Added AGG-18–22 for media types, XML data, error fields and exact per-transport error sizes. |
+| 7.3; 7.3.1 | Existing FAIL/REC/URI rows cover the keyword obligations; failure reports remain unsupported. |
+| 8 | Daily/mailto operation is already AGG-07/URI-06; the ten-megabyte minimum has no RFC 2119 keyword and was not newly certified by this keyword audit. |
+| 9.1–9.2; 10.1–10.5 | Privacy and operational discussion; no additional uppercase receiver/reporter obligations. |
+| 11.1–11.5 | IANA registrations; format/tag processing already covered by REC rows. |
+| 12.1–12.6 | Added EXT-07 for the recommendation to use external-destination verification; secure transport already AGG-08. |
+| 13.1–13.2; A.1–A.6.1; B.1–B.5; C | References, design discussion, examples and schema; existing example/XML tests, including XML-01's version MUST. |
+
+The new rows below use the full `DMARC-` prefix; the audit table abbreviates it.
+Error reports in §7.2.2 describe failed aggregate-report **delivery**, distinct
+from the unsupported per-message failure reports in §7.3.
 
 ## Records (§6.1, §6.3, §6.4)
 
@@ -98,6 +126,9 @@ records. Custom `TXTResolver` implementations must preserve that contract.
 | DMARC-DISC-13 | 6.6.2 | SHOULD NOT | Use heuristics such as best-guess SPF for a domain that publishes no SPF or DKIM. | n/a: the caller runs SPF and DKIM. |
 | DMARC-DISC-14 | 6.6.2 | Normative | When no aligned identifier passes and one failed temporarily, the policy cannot be applied. | n/a: the caller combines the SPF and DKIM results. |
 | DMARC-DISC-15 | 6.6.1; RFC 1035 2.3.4 | Normative | A domain name is at most 253 characters of labels of at most 63; a longer input is not a domain and is refused before it is punycode-encoded. | `TestLongNamesRefusedQuickly` |
+| DMARC-DISC-16 | 6.6.2 | MUST | Extract the domain from the message's RFC5322.From field for DMARC policy discovery. | n/a: the caller parses the message and supplies the extracted domain to Discover; the library accepts a domain, not a message or From header. |
+| DMARC-DISC-17 | 6.6.2 | MUST | Perform DKIM signature verification checks as part of determining DMARC handling policy. | n/a: the caller runs a DKIM verifier and passes its results and signing domains; the library does not verify signatures. |
+| DMARC-DISC-18 | 6.6.2 | MUST | Perform SPF validation checks as part of determining DMARC handling policy. | n/a: the caller runs an SPF evaluator and passes its results and checked domains; the library does not evaluate SPF records. |
 
 ## Identifier alignment and the Organizational Domain (§3)
 
@@ -120,7 +151,13 @@ records. Custom `TXTResolver` implementations must preserve that contract.
 | DMARC-POL-04 | 6.7 | SHOULD NOT | Let a discovered p=none change how mail is handled. | n/a: the caller's disposition. |
 | DMARC-POL-05 | 6.7 | MUST | Encode the domain recorded in Authentication-Results as an A-label. | n/a: the library writes no header fields. |
 | DMARC-POL-06 | 6.3 | SHOULD | Reject during the SMTP transaction. | n/a: the library speaks no SMTP. |
-| DMARC-POL-07 | 6.6.4 | MUST | Include every message's data in reports, whatever pct= says. | `TestAggregateRecords_GroupsAndCounts` |
+| DMARC-POL-07 | 6.6.4 | MUST | Include every message's data in reports, whatever pct= says. | `TestAggregateRecords_GroupsAndCounts`, `TestBuildReportSamplingKeepsAllMessages` |
+| DMARC-POL-08 | 6 | SHOULD | Make a best-effort attempt to follow the published policy when a message fails DMARC. | n/a: the caller decides message disposition; the library discovers the requested policy only. |
+| DMARC-POL-09 | 6.6.4 | SHOULD | Quarantine a message selected for enforcement of a quarantine policy. | n/a: the caller performs sampling and quarantine delivery; the library has no message-delivery API. |
+| DMARC-POL-10 | 6.6.4 | SHOULD | Reject a message selected for enforcement of a reject policy. | n/a: the caller performs sampling and SMTP rejection. |
+| DMARC-POL-11 | 6.7 | RECOMMENDED | Add Authentication-Results when delivering mail that fails DMARC despite the published policy. | n/a: the caller constructs message headers; the library writes no Authentication-Results field. |
+| DMARC-POL-12 | 6.7 | SHOULD | Implement DMARC reporting instructions even without a DKIM- or SPF-specific reporting request. | n/a: the caller invokes reporting independently of upstream authentication-report requests; this library neither reads those requests nor schedules delivery. |
+| DMARC-POL-13 | 6.7 | SHOULD NOT | Let the presence of DKIM- or SPF-specific reporting requests affect DMARC reporting. | n/a: the caller controls reporting triggers; those upstream reporting requests are not inputs to this library. |
 
 ## Verifying external destinations (§7.1)
 
@@ -132,6 +169,7 @@ records. Custom `TXTResolver` implementations must preserve that contract.
 | DMARC-EXT-04 | 7.1 | Normative | A rua= or ruf= in the confirming record replaces the URI. | `TestAuthorizeReportURIs` |
 | DMARC-EXT-05 | 7.1 | MUST | An overriding URI uses the same destination host; otherwise neither it nor the original is used. | `TestAuthorizeReportURIs` |
 | DMARC-EXT-06 | 7.1 | MAY | A temporary DNS error lets the caller try the check again later. | `TestAuthorizeReportURIs` |
+| DMARC-EXT-07 | 12.5 | SHOULD | Use the external-reporting verification mechanism of §7.1. | n/a: the caller must invoke AuthorizeReportURIs before external delivery; BuildReport constructs XML without sending or choosing destinations. |
 
 ## Aggregate reports (§7.2)
 
@@ -154,6 +192,11 @@ records. Custom `TXTResolver` implementations must preserve that contract.
 | DMARC-AGG-15 | 7.2.1.1 | SHOULD | Give the report's Subject the form of the ABNF. | n/a: the caller builds the message. |
 | DMARC-AGG-16 | 7.2.2 | MUST | Format an error report per MIME, with a text/plain part of field-value pairs, and send it to every mailto: URI. | n/a: the library sends nothing. |
 | DMARC-AGG-17 | 6.3 | MUST NOT | Apply pct= to DMARC report mail. | n/a: the caller handles mail. |
+| DMARC-AGG-18 | 7.2.1.1 | SHOULD | Label compressed aggregate data application/gzip and uncompressed data text/xml. | n/a: the caller builds MIME parts and chooses their Content-Type; Gzip returns bytes only. |
+| DMARC-AGG-19 | 7.2.1.1 | MUST | Encode the aggregate data as an XML file, including when it is gzip-compressed for delivery. | `TestAggregateAttachmentXML` |
+| DMARC-AGG-20 | 7.2.2 | MUST | Set an error report's Report-Size to the actual number of bytes attempted on that transport. | n/a: the caller sends reports and constructs delivery-error messages; the library cannot observe transport encoding or attempted byte counts. |
+| DMARC-AGG-21 | 7.2.2 | MUST | Generate separate delivery-error reports when attempted sizes differ between transports. | n/a: the caller tracks delivery attempts and constructs delivery-error messages. |
+| DMARC-AGG-22 | 7.2.2 | MUST | Include Report-Date, Report-Domain, Report-ID, Report-Size, Submitter and Submitting-URI in the delivery-error report. | n/a: the caller constructs delivery-error MIME messages; the library builds successful aggregate-report XML only. |
 
 ## The report schema (Appendix C)
 
