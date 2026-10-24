@@ -2,10 +2,8 @@ package dmarc
 
 import (
 	"errors"
-	"math"
 	"net"
 	"net/url"
-	"strconv"
 	"strings"
 )
 
@@ -17,86 +15,126 @@ var systemResolver TXTResolver = net.LookupTXT
 // resolver passed to [Lookup] falls back to net.LookupTXT.
 //
 // Each returned string is one TXT record with its character-strings already
-// joined in order, which is what RFC 7489 §6.1 asks for and what
+// joined in order, which is what RFC 9989 §4.5 asks for and what
 // net.LookupTXT does.
 type TXTResolver func(name string) ([]string, error)
 
 var (
 	// ErrNotDMARC is returned by [ParseRecord] for a TXT record whose first
-	// tag is not v=DMARC1. RFC 7489 §6.3 says such a record is ignored.
+	// tag is not v=DMARC1. RFC 9989 §4.7 says such a record is ignored.
 	ErrNotDMARC = errors.New("dmarc: not a DMARC record (v=DMARC1 must be the first tag)")
 
 	// ErrNoPolicy is returned by [ParseRecord] for a DMARC record with no
-	// valid p= tag, or an invalid sp= tag, and no valid rua= URI to report
-	// to. RFC 7489 §6.6.3 step 6 says DMARC is then not applied at all.
+	// valid p= tag, or an invalid sp= or np= tag, and no valid rua= URI to
+	// report to. RFC 9989 §4.10.1 says DMARC is then not applied at all.
 	ErrNoPolicy = errors.New("dmarc: record has no valid policy and no valid rua")
 )
 
-// Record is a parsed DMARC policy record (RFC 7489 §6.3). Every tag the
-// record omits, or carries with a syntax error, holds its default.
+// Record is a parsed DMARC Policy Record (RFC 9989 §4.7). Every tag the
+// record omits, or carries with a syntax error, holds its default. The tags
+// RFC 9989 removed (pct, rf and ri, Appendix C.5.2) are unknown tags now, and
+// ignored like any other.
 type Record struct {
 	// Policy is the p= tag: "none", "quarantine" or "reject". It is "none"
 	// when p= is missing or invalid but the record names a valid rua= URI
-	// (§6.6.3 step 6).
+	// (§4.10.1).
 	Policy string
-	// SubdomainPolicy is the sp= tag, or "" when the record has none, in
-	// which case Policy applies to subdomains too.
+	// SubdomainPolicy is the sp= tag, the policy for existing subdomains, or
+	// "" when the record has none, in which case Policy applies to them.
 	SubdomainPolicy string
+	// NonExistentPolicy is the np= tag, the policy for subdomains that do not
+	// exist (an NXDOMAIN answer, §3.2.13), or "" when the record has none, in
+	// which case SubdomainPolicy, or else Policy, applies to them.
+	NonExistentPolicy string
+	// PSD is the psd= tag: "y" for a Public Suffix Domain's record, "n" for a
+	// record that is the Organizational Domain of itself and its subdomains,
+	// and "u", the default, when the DNS Tree Walk decides (§4.10.2).
+	PSD string
+	// Testing is the t= tag set to "y": the Domain Owner is testing its
+	// policy and expects one level less to be applied (§4.7, Appendix A.6).
+	// It is false, the default, for t=n.
+	Testing bool
 	// ADKIM and ASPF are the DKIM and SPF alignment modes of the adkim= and
 	// aspf= tags; relaxed by default.
 	ADKIM AlignmentMode
 	ASPF  AlignmentMode
-	// Pct is the pct= tag, the percentage (0 to 100) of failing messages
-	// the policy is applied to; 100 by default (§6.6.4).
-	Pct int
-	// FailureOptions is the fo= tag split at its colons ("0", "1", "d",
-	// "s"). It is ["0"], the default, when the record has no ruf= URI, whose
-	// absence makes fo= ignored.
+	// FailureOptions is the fo= tag split at its colons ("0" or "1", and
+	// "d" and "s"). It is ["0"], the default, when the record has no ruf=
+	// URI, whose absence makes fo= ignored.
 	FailureOptions []string
-	// ReportFormats is the rf= tag: the failure-report formats, of which
-	// "afrf" is the only one registered; ["afrf"] by default.
-	ReportFormats []string
-	// ReportInterval is the ri= tag, the requested number of seconds
-	// between aggregate reports; 86400 by default.
-	ReportInterval uint32
 	// RUA and RUF are the aggregate and failure report URIs (the rua= and
 	// ruf= tags), in the order published. URIs that are not valid are left
-	// out.
-	RUA []ReportURI
-	RUF []ReportURI
+	// out, and the obsolete "!" size limit is dropped from those that carry
+	// one (§4.8).
+	RUA []string
+	RUF []string
 }
 
-// ReportURI is one DMARC URI of a rua= or ruf= tag (RFC 7489 §6.2).
-type ReportURI struct {
-	// URI is the address without its size limit, for example
-	// "mailto:reports@example.com".
-	URI string
-	// MaxSize is the largest report, in bytes, the URI accepts: its "!" size
-	// limit with the unit applied (a "k" is 2^10 bytes), or math.MaxUint64
-	// when it sets none. A limit too large for 64 bits is math.MaxUint64.
-	MaxSize uint64
-}
-
-// ParseRecord parses a DMARC TXT record (RFC 7489 §6.3, §6.4).
+// ParseRecord parses a DMARC TXT record (RFC 9989 §4.7, §4.8).
 //
 // The first tag must be v=DMARC1, with the value matched exactly; otherwise
 // the record is not a DMARC record and the error is [ErrNotDMARC]. Tag names
-// and the enumerated values (none, quarantine, reject, r, s, the fo= options)
-// are matched case-insensitively, as the ABNF's quoted strings are, and
-// whitespace around "=" and ";" is ignored. Unknown tags are ignored.
+// and the enumerated values (none, quarantine, reject, y, n, u, r, s, the fo=
+// options) are matched case-insensitively, as the ABNF's quoted strings are,
+// and whitespace around "=" and ";" is ignored. Unknown tags, among them the
+// pct, rf and ri that RFC 7489 had, are ignored.
 //
 // A tag with a syntax error, and a tag that appears more than once, is
-// discarded in favour of its default (§6.3). For p= and sp= that leaves the
-// record without a valid policy, which §6.6.3 step 6 settles: with at least
-// one valid rua= URI the record reads as p=none, and without one the error is
+// discarded in favour of its default (§4.8). For p=, sp= and np= that leaves
+// the record without a valid policy, which §4.10.1 settles: with at least one
+// valid rua= URI the record reads as p=none, and without one the error is
 // [ErrNoPolicy] and DMARC does not apply.
 func ParseRecord(txt string) (Record, error) {
-	parts := strings.Split(txt, ";")
-	if !isVersionTag(parts[0]) {
+	tags, repeated, ok := recordTags(txt)
+	if !ok {
 		return Record{}, ErrNotDMARC
 	}
-	tags := map[string]string{}
-	repeated := map[string]bool{}
+
+	r := Record{
+		PSD:            psdTag(tags),
+		Testing:        strings.EqualFold(tags["t"], "y"),
+		ADKIM:          alignmentTag(tags, "adkim"),
+		ASPF:           alignmentTag(tags, "aspf"),
+		FailureOptions: []string{"0"},
+	}
+	if v, ok := tags["rua"]; ok {
+		r.RUA = parseReportURIs(v)
+	}
+	if v, ok := tags["ruf"]; ok {
+		r.RUF = parseReportURIs(v)
+	}
+	if len(r.RUF) > 0 {
+		if fo, ok := failureOptions(tags["fo"]); ok {
+			r.FailureOptions = fo
+		}
+	}
+
+	p, pValid := policyValue(tags, "p")
+	sp, spValid := subdomainPolicy(tags, repeated, "sp")
+	np, npValid := subdomainPolicy(tags, repeated, "np")
+	switch {
+	case pValid && spValid && npValid:
+		r.Policy, r.SubdomainPolicy, r.NonExistentPolicy = p, sp, np
+	case len(r.RUA) > 0:
+		// §4.10.1: act as if the record were v=DMARC1; p=none.
+		r.Policy = "none"
+	default:
+		return Record{}, ErrNoPolicy
+	}
+	return r, nil
+}
+
+// recordTags splits a DMARC record into its tags after v=DMARC1, keyed by
+// lower-case name, with whitespace around the names and values trimmed. A
+// tag that appears more than once is left out and named in repeated (RFC
+// 6376 §3.2). ok is false for a record that does not start with v=DMARC1.
+func recordTags(txt string) (tags map[string]string, repeated map[string]bool, ok bool) {
+	parts := strings.Split(txt, ";")
+	if !isVersionTag(parts[0]) {
+		return nil, nil, false
+	}
+	tags = map[string]string{}
+	repeated = map[string]bool{}
 	for _, part := range parts[1:] {
 		name, value, found := strings.Cut(part, "=")
 		if !found {
@@ -111,65 +149,28 @@ func ParseRecord(txt string) (Record, error) {
 	for name := range repeated {
 		delete(tags, name)
 	}
-
-	r := Record{
-		ADKIM:          alignmentTag(tags, "adkim"),
-		ASPF:           alignmentTag(tags, "aspf"),
-		Pct:            pctTag(tags),
-		FailureOptions: []string{"0"},
-		ReportFormats:  []string{"afrf"},
-		ReportInterval: intervalTag(tags),
-	}
-	if v, ok := tags["rua"]; ok {
-		r.RUA = parseReportURIs(v)
-	}
-	if v, ok := tags["ruf"]; ok {
-		r.RUF = parseReportURIs(v)
-	}
-	if len(r.RUF) > 0 {
-		if fo, ok := failureOptions(tags["fo"]); ok {
-			r.FailureOptions = fo
-		}
-	}
-	if rf, ok := reportFormats(tags["rf"]); ok {
-		r.ReportFormats = rf
-	}
-
-	p, pValid := policyValue(tags, "p")
-	sp, spValid := policyValue(tags, "sp")
-	if _, present := tags["sp"]; !present && !repeated["sp"] {
-		spValid = true // an absent sp= is valid; p= then covers subdomains
-	}
-	switch {
-	case pValid && spValid:
-		r.Policy, r.SubdomainPolicy = p, sp
-	case len(r.RUA) > 0:
-		// §6.6.3 step 6.1: act as if the record were v=DMARC1; p=none.
-		r.Policy = "none"
-	default:
-		return Record{}, ErrNoPolicy
-	}
-	return r, nil
+	return tags, repeated, true
 }
 
 // isVersionTag reports whether a record's first tag is the version tag,
-// dmarc-version = "v" *WSP "=" *WSP %x44 %x4d %x41 %x52 %x43 %x31 (§6.4): the
-// tag name is case-insensitive like every quoted ABNF string, while the value
-// is the exact upper-case DMARC1 (§6.3: it "MUST match precisely").
+// dmarc-version = "v" equals %s"DMARC1" (§4.8): the tag name is
+// case-insensitive like every quoted ABNF string, while the value is the
+// exact upper-case DMARC1 (§4.7: "The tag value is case sensitive").
 func isVersionTag(tag string) bool {
 	name, value, found := strings.Cut(tag, "=")
 	return found && strings.EqualFold(strings.TrimSpace(name), "v") && strings.TrimSpace(value) == "DMARC1"
 }
 
 // hasDMARCVersion reports whether a TXT record is a DMARC record: its first
-// tag is v=DMARC1 (RFC 7489 §6.3, §6.6.3 steps 2 and 4).
+// tag is v=DMARC1 (RFC 9989 §4.7, §4.10 step 2).
 func hasDMARCVersion(record string) bool {
 	first, _, _ := strings.Cut(record, ";")
 	return isVersionTag(first)
 }
 
-// policyValue returns the lower-cased value of a p= or sp= tag and whether it
-// is present with one of the values none, quarantine and reject (§6.3).
+// policyValue returns the lower-cased value of a p=, sp= or np= tag and
+// whether it is present with one of the values none, quarantine and reject
+// (dmarc-request, §4.8).
 func policyValue(tags map[string]string, name string) (string, bool) {
 	v, ok := tags[name]
 	if !ok {
@@ -183,6 +184,26 @@ func policyValue(tags map[string]string, name string) (string, bool) {
 	return "", false
 }
 
+// subdomainPolicy reads sp= or np=: an absent tag is valid and empty, since
+// the policy above it then applies, while one that is present must be valid,
+// and so must not be repeated (§4.10.1).
+func subdomainPolicy(tags map[string]string, repeated map[string]bool, name string) (string, bool) {
+	if _, present := tags[name]; !present && !repeated[name] {
+		return "", true
+	}
+	return policyValue(tags, name)
+}
+
+// psdTag reads psd= (dmarc-psd = "y" / "n" / "u", §4.8); an absent or
+// invalid tag is the default "u".
+func psdTag(tags map[string]string) string {
+	switch v := strings.ToLower(tags["psd"]); v {
+	case "y", "n":
+		return v
+	}
+	return "u"
+}
+
 // alignmentTag reads adkim= or aspf=: "s" is strict, and anything else,
 // including an absent or invalid tag, is the relaxed default.
 func alignmentTag(tags map[string]string, name string) AlignmentMode {
@@ -192,68 +213,33 @@ func alignmentTag(tags map[string]string, name string) AlignmentMode {
 	return AlignmentRelaxed
 }
 
-// pctTag reads pct= (dmarc-percent = "pct" *WSP "=" *WSP 1*3DIGIT, at most
-// 100); an absent or invalid tag is the default of 100.
-func pctTag(tags map[string]string) int {
-	v, ok := tags["pct"]
-	if !ok || len(v) == 0 || len(v) > 3 || !allDigits(v) {
-		return 100
-	}
-	n, _ := strconv.Atoi(v)
-	if n > 100 {
-		return 100
-	}
-	return n
-}
-
-// intervalTag reads ri= (1*DIGIT, a 32-bit unsigned number of seconds); an
-// absent or invalid tag is the default of 86400.
-func intervalTag(tags map[string]string) uint32 {
-	v, ok := tags["ri"]
-	if !ok || !allDigits(v) {
-		return 86400
-	}
-	n, err := strconv.ParseUint(v, 10, 32)
-	if err != nil {
-		return 86400
-	}
-	return uint32(n)
-}
-
-// failureOptions reads fo=, a colon-separated list of 0, 1, d and s with
-// optional whitespace around the colons. It returns false for an invalid
-// list, which then takes the default.
+// failureOptions reads fo= (dmarc-fo, §4.8): a colon-separated list of
+// "0" or "1", which exclude each other, and "d" and "s", each at most once,
+// in any order, with optional whitespace around the colons. It returns false
+// for an invalid list, which then takes the default.
 func failureOptions(v string) ([]string, bool) {
 	var opts []string
+	seen := map[string]bool{}
 	for _, o := range strings.Split(v, ":") {
 		o = strings.ToLower(strings.TrimSpace(o))
 		switch o {
 		case "0", "1", "d", "s":
-			opts = append(opts, o)
 		default:
 			return nil, false
 		}
+		if seen[o] || (o == "0" && seen["1"]) || (o == "1" && seen["0"]) {
+			return nil, false
+		}
+		seen[o] = true
+		opts = append(opts, o)
 	}
 	return opts, true
 }
 
-// reportFormats reads rf=, keeping the registered formats (only afrf) and
-// ignoring the others, as §6.3 says a receiver should. It returns false when
-// none is left, which then takes the default.
-func reportFormats(v string) ([]string, bool) {
-	var formats []string
-	for _, f := range strings.Split(v, ":") {
-		if f = strings.ToLower(strings.TrimSpace(f)); f == "afrf" {
-			formats = append(formats, f)
-		}
-	}
-	return formats, len(formats) > 0
-}
-
-// parseReportURIs reads a comma-separated list of DMARC URIs (§6.2, §6.4),
-// keeping the valid ones in order.
-func parseReportURIs(v string) []ReportURI {
-	var uris []ReportURI
+// parseReportURIs reads a comma-separated list of DMARC URIs (dmarc-urilist,
+// §4.8), keeping the valid ones in order.
+func parseReportURIs(v string) []string {
+	var uris []string
 	for _, s := range strings.Split(v, ",") {
 		if u, ok := parseReportURI(strings.TrimSpace(s)); ok {
 			uris = append(uris, u)
@@ -262,35 +248,41 @@ func parseReportURIs(v string) []ReportURI {
 	return uris
 }
 
-// parseReportURI reads one dmarc-uri = URI [ "!" 1*DIGIT [ "k" / "m" / "g" /
-// "t" ] ]. A "!" inside the URI must be percent-encoded, so the first one
-// starts the size limit. The URI must be absolute (have a scheme) and contain
-// no whitespace, control or non-ASCII characters (an RFC 3986 URI is ASCII);
-// the size must fit in 64 bits. A mailto: URI must name conventional
-// addresses: RFC 8616 §6 says a record serves internationalized and
-// conventional mail alike, so its report addresses are never
-// internationalized, even percent-encoded.
-func parseReportURI(s string) (ReportURI, bool) {
+// parseReportURI reads one dmarc-uri, or an obs-dmarc-uri, which is a
+// dmarc-uri followed by "!" 1*DIGIT [ "k" / "m" / "g" / "t" ] (§4.8). The
+// size limit is obsolete, so it is checked for its syntax and dropped: a
+// reporter "should ignore" it. A "!" inside the URI must be percent-encoded,
+// so the first one starts the size limit. The URI must be absolute (have a
+// scheme) and contain no whitespace, control or non-ASCII characters (an RFC
+// 3986 URI is ASCII). A mailto: URI must name conventional addresses: RFC
+// 8616 §6 says a record serves internationalized and conventional mail
+// alike, so its report addresses are never internationalized, even
+// percent-encoded.
+func parseReportURI(s string) (string, bool) {
 	raw, limit, hasLimit := strings.Cut(s, "!")
-	u := ReportURI{URI: raw, MaxSize: math.MaxUint64}
-	if hasLimit {
-		size, ok := parseSizeLimit(limit)
-		if !ok {
-			return ReportURI{}, false
-		}
-		u.MaxSize = size
+	if hasLimit && !obsoleteSizeLimit(limit) {
+		return "", false
 	}
 	if raw == "" || strings.ContainsFunc(raw, func(r rune) bool { return r <= ' ' || r >= 0x7f }) {
-		return ReportURI{}, false
+		return "", false
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Scheme == "" || parsed.Opaque == "" && parsed.Host == "" && parsed.Path == "" {
-		return ReportURI{}, false
+		return "", false
 	}
 	if strings.EqualFold(parsed.Scheme, "mailto") && !conventionalMailto(parsed.Opaque) {
-		return ReportURI{}, false
+		return "", false
 	}
-	return u, true
+	return raw, true
+}
+
+// obsoleteSizeLimit reports whether s, what follows a URI's "!", is the
+// obsolete size limit 1*DIGIT [ "k" / "m" / "g" / "t" ] (§4.8).
+func obsoleteSizeLimit(s string) bool {
+	if s != "" && strings.ContainsRune("kmgtKMGT", rune(s[len(s)-1])) {
+		s = s[:len(s)-1]
+	}
+	return allDigits(s)
 }
 
 // conventionalMailto reports whether the addresses of a mailto: URI's opaque
@@ -310,39 +302,6 @@ func conventionalMailto(opaque string) bool {
 	return true
 }
 
-// parseSizeLimit reads 1*DIGIT [ "k" / "m" / "g" / "t" ]: a count of bytes,
-// or of 2^10, 2^20, 2^30 or 2^40 bytes with a unit. The count must fit in an
-// unsigned 64-bit integer (§6.4); the product saturates at math.MaxUint64.
-func parseSizeLimit(s string) (uint64, bool) {
-	shift := uint(0)
-	if s != "" {
-		switch s[len(s)-1] {
-		case 'k', 'K':
-			shift = 10
-		case 'm', 'M':
-			shift = 20
-		case 'g', 'G':
-			shift = 30
-		case 't', 'T':
-			shift = 40
-		}
-		if shift > 0 {
-			s = s[:len(s)-1]
-		}
-	}
-	if !allDigits(s) {
-		return 0, false
-	}
-	n, err := strconv.ParseUint(s, 10, 64)
-	if err != nil {
-		return 0, false
-	}
-	if n > math.MaxUint64>>shift {
-		return math.MaxUint64, true
-	}
-	return n << shift, true
-}
-
 // allDigits reports whether s is one or more ASCII digits.
 func allDigits(s string) bool {
 	if s == "" {
@@ -357,21 +316,22 @@ func allDigits(s string) bool {
 }
 
 // Lookup fetches and returns the raw DMARC record published at
-// _dmarc.<domain>. It maps DNS outcomes to the three RFC 7489 §6.6.3 cases:
+// _dmarc.<domain>. It maps DNS outcomes to three cases (RFC 9989 §4.10,
+// §4.10.1):
 //
 //   - Record found: the raw "v=DMARC1..." TXT record and a nil error.
 //   - No DMARC policy: ("", nil). This covers a name that carries no v=DMARC1
 //     record, a name that does not exist at all (a not-found/NXDOMAIN result is
 //     "DMARC does not apply", not a failure), a name that carries more than
-//     one v=DMARC1 record (an ambiguous set §6.6.3 discards), and a domain
+//     one v=DMARC1 record (all of which §4.10 discards), and a domain
 //     that is not a valid DNS name, for which no query is sent.
 //   - Transient failure (SERVFAIL, timeout, and other non-not-found DNS
 //     errors): ("", err). Callers must treat this as temperror and not fail
 //     open — the domain's policy is unknown, not absent.
 //
-// The domain is queried in its A-label form (§6.6.1): lower case, without a
-// root dot, and with Unicode labels punycode-encoded. Lookup does not fall
-// back to the Organizational Domain; [Discover] does.
+// The domain is queried in its A-label form (§5.3.1): lower case, without a
+// root dot, and with Unicode labels punycode-encoded. Lookup does not walk
+// the DNS tree; [Discover] does.
 //
 // The distinction relies on the resolver reporting not-found via a
 // *net.DNSError whose IsNotFound is set, which is what [net.LookupTXT] does;
@@ -385,9 +345,9 @@ func Lookup(domain string, resolver TXTResolver) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	// RFC 7489 §6.6.3 step 5: exactly one v=DMARC1 record is a usable policy.
-	// Zero records, or more than one (an ambiguous set that is discarded), both
-	// mean the domain has no applicable policy.
+	// RFC 9989 §4.10 step 2: exactly one v=DMARC1 record is a record. Zero
+	// records, or more than one (all of which are discarded), both mean the
+	// name publishes none.
 	if len(records) != 1 {
 		return "", nil
 	}
@@ -395,7 +355,7 @@ func Lookup(domain string, resolver TXTResolver) (string, error) {
 }
 
 // lookupDMARC queries _dmarc.<domain> and returns the TXT records at that name
-// whose first tag is the v=DMARC1 version tag — the RFC 7489 §6.6.3 filtering that discards
+// whose first tag is the v=DMARC1 version tag — the RFC 9989 §4.10 filtering that discards
 // non-DMARC TXT records (SPF, verification tokens, and the like). A nil resolver
 // falls back to [net.LookupTXT]. It applies Lookup's error contract: a not-found
 // (NXDOMAIN) result maps to an empty set with a nil error, while other resolver
@@ -415,7 +375,7 @@ func lookupVersioned(name string, resolver TXTResolver) ([]string, error) {
 	records, err := resolver(name)
 	if err != nil {
 		// A not-found result means the name publishes no DMARC record, which
-		// RFC 7489 §6.6.3 treats as "no policy", not a lookup failure. Only
+		// RFC 9989 §4.10.1 treats as "no record", not a lookup failure. Only
 		// genuine transient errors surface to the caller.
 		var dnsErr *net.DNSError
 		if errors.As(err, &dnsErr) && dnsErr.IsNotFound {

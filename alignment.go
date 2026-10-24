@@ -7,87 +7,8 @@ import (
 	"unicode/utf8"
 )
 
-// Aligned reports whether an authenticated domain aligns with the From domain
-// under DMARC relaxed alignment (RFC 7489 §3.1): their Organizational Domains
-// (§3.2) must be equal. Strict alignment is a plain exact match, which Aligned
-// also reports since an exact match trivially shares an organizational domain.
-//
-// Alignment is NOT a raw suffix test. Comparing organizational domains both
-// accepts alignments the RFC requires (sibling subdomains such as
-// em.example.com and mail.example.com, which share example.com) and rejects
-// ones it forbids (a lookalike like evil-example.com, or an authenticated
-// domain that is itself a public suffix — the RFC notes a DKIM signature
-// bearing d=com never yields an aligned result).
-//
-// Both identifiers are sanitized before comparison (see [AlignedOrg]): an empty
-// identifier never aligns, a single trailing (root) dot is ignored, and each is
-// folded to a single lower-case A-label form so that a Unicode domain and its
-// xn-- punycode encoding are treated as the same name.
-//
-// Aligned uses the registry-free [DefaultOrgDomain] heuristic, which is correct
-// for single-label public suffixes but not multi-label ones (e.g. it treats
-// co.uk itself as an organizational domain). For full accuracy under
-// multi-label public suffixes, use [AlignedOrg] with a PSL-backed
-// [OrgDomainFunc].
-func Aligned(authDomain, fromDomain string) bool {
-	return AlignedOrg(authDomain, fromDomain, nil)
-}
-
-// AlignedOrg is [Aligned] with an injectable [OrgDomainFunc], so callers can
-// supply a Public Suffix List-backed organizational-domain derivation (a small
-// wrapper around golang.org/x/net/publicsuffix.EffectiveTLDPlusOne). A nil
-// orgDomain uses [DefaultOrgDomain]. Keeping the hook injectable is what lets
-// this package stay dependency-free while still supporting correct relaxed
-// alignment under multi-label public suffixes such as co.uk — the same hook
-// [Discover] uses for its §6.6.3 organizational-domain fallback.
-//
-// Both inputs are first sanitized with [normalizeDomain]: a single trailing
-// (root) dot is stripped, the name is lower-cased, and any Unicode labels are
-// converted to their ASCII (xn-- punycode) A-label form. Sanitizing closes three
-// ways the raw equality test would otherwise misfire (RFC 7489 §3.1):
-//
-//   - An empty identifier means "no authenticated domain" and must never align.
-//     Two empty inputs would trivially compare equal and yield a false DMARC
-//     pass, so an empty input on either side returns false up front. So does
-//     an input that is not a DNS name at all (".." or "a b", say).
-//   - A fully-qualified name carrying the root dot ("example.com.") denotes the
-//     same domain as "example.com" and must align with it.
-//   - The same domain written as a Unicode U-label and as its xn-- A-label is one
-//     domain; normalizing both to the A-label form keeps them from spuriously
-//     failing (or, for the org-domain comparison, spuriously matching) on
-//     encoding form alone.
-//
-// Relaxed alignment (RFC 7489 §3.1) holds when the two Organizational Domains
-// are non-empty and equal. A domain that is itself a public suffix has no
-// registrable Organizational Domain: a PSL-backed OrgDomainFunc returns "" for
-// it, so such a domain never aligns. Strict alignment (an exact,
-// case-insensitive match) is always reported, independent of the hook.
-func AlignedOrg(authDomain, fromDomain string, orgDomain OrgDomainFunc) bool {
-	authDomain, authOK := queryDomain(authDomain)
-	fromDomain, fromOK := queryDomain(fromDomain)
-	// An empty input is an absent identifier, not a domain, and a string that
-	// is not a DNS name was not authenticated; neither can ever align (and two
-	// empties must not compare equal into a false pass).
-	if !authOK || !fromOK {
-		return false
-	}
-	// Strict alignment: an exact match always aligns.
-	if authDomain == fromDomain {
-		return true
-	}
-	if orgDomain == nil {
-		orgDomain = DefaultOrgDomain
-	}
-	authOrg, authOK := queryDomain(orgDomain(authDomain))
-	fromOrg, fromOK := queryDomain(orgDomain(fromDomain))
-	// Relaxed alignment: the Organizational Domains must match. An empty result
-	// marks an input that is itself a public suffix (per a PSL-backed hook),
-	// which can never align.
-	return authOK && fromOK && authOrg == fromOrg
-}
-
 // AlignmentMode is the DMARC identifier-alignment mode a record requests through
-// its adkim= / aspf= tag (RFC 7489 §6.3): relaxed (the default) or strict.
+// its adkim= / aspf= tag (RFC 9989 §4.7): relaxed (the default) or strict.
 type AlignmentMode int
 
 const (
@@ -99,8 +20,7 @@ const (
 	AlignmentRelaxed AlignmentMode = iota
 	// AlignmentStrict is DMARC strict alignment (adkim=s / aspf=s). The two
 	// identifier domains must be an exact, case-insensitive FQDN match; a
-	// subdomain of the From domain does NOT align. RFC 7489 §10.4 documents strict
-	// alignment as the mitigation for a hostile delegated subdomain.
+	// subdomain of the From domain does NOT align.
 	AlignmentStrict
 )
 
@@ -117,31 +37,42 @@ func (m AlignmentMode) String() string {
 	}
 }
 
-// AlignedMode reports whether authDomain aligns with fromDomain under the given
-// DMARC alignment mode (RFC 7489 §3.1), with an injectable [OrgDomainFunc] for
-// the relaxed org-domain derivation (nil uses [DefaultOrgDomain]). Callers pass
-// the mode parsed from a record with [ParseADKIM] (for a DKIM d= identifier) or
-// [ParseASPF] (for an SPF-authenticated identifier), or exposed on
-// [Policy.ADKIM] / [Policy.ASPF].
+// AlignedMode reports whether an Authenticated Identifier, authDomain (an SPF
+// smtp.mailfrom domain or a verified DKIM signature's d=), is in alignment
+// with the Author Domain, fromDomain, under the record's adkim= or aspf= mode
+// (RFC 9989 §4.4): identical names under [AlignmentStrict], and names with
+// the same Organizational Domain under [AlignmentRelaxed]. The Organizational
+// Domains come from a DNS Tree Walk for each name ([OrgDomain], §4.10.2),
+// which is only sent when the two names differ and the mode is relaxed.
 //
-// Under [AlignmentRelaxed] the result is exactly [AlignedOrg]: equal
-// Organizational Domains align. Under [AlignmentStrict] the org-domain hook is
-// not consulted — the two identifier domains must be an exact, case-insensitive
-// FQDN match after [normalizeDomain], so a From domain and a delegated subdomain
-// of it do NOT align. Both inputs are sanitized as in [AlignedOrg]; an empty
-// identifier never aligns.
-func AlignedMode(authDomain, fromDomain string, mode AlignmentMode, orgDomain OrgDomainFunc) bool {
-	if mode != AlignmentStrict {
-		return AlignedOrg(authDomain, fromDomain, orgDomain)
-	}
-	// Strict alignment: an exact, case-insensitive FQDN match after
-	// normalization. The org-domain hook is deliberately not consulted, so a
-	// delegated subdomain of the From domain does not align. An empty (absent)
-	// identifier never aligns, and two empties must not compare equal into a
-	// false pass.
+// Both names are compared in their lower-case A-label form, without a root
+// dot (§4.4: comparisons are case-insensitive). An empty identifier, or one
+// that is not a DNS name, never aligns, so two empty inputs cannot compare
+// equal into a false pass. A name that is itself a public suffix with no
+// record of its own (d=com, say) is its own Organizational Domain, so it
+// aligns with no other. resolver may be nil, for system DNS; its errors are
+// returned, and the caller decides whether to fail open or closed.
+func AlignedMode(authDomain, fromDomain string, mode AlignmentMode, resolver TXTResolver) (bool, error) {
 	authDomain, authOK := queryDomain(authDomain)
 	fromDomain, fromOK := queryDomain(fromDomain)
-	return authOK && fromOK && authDomain == fromDomain
+	if !authOK || !fromOK {
+		return false, nil
+	}
+	if authDomain == fromDomain {
+		return true, nil
+	}
+	if mode == AlignmentStrict {
+		return false, nil
+	}
+	authOrg, err := OrgDomain(authDomain, resolver)
+	if err != nil {
+		return false, err
+	}
+	fromOrg, err := OrgDomain(fromDomain, resolver)
+	if err != nil {
+		return false, err
+	}
+	return authOrg == fromOrg, nil
 }
 
 // queryDomain returns the A-label form of a domain (see [normalizeDomain]) and

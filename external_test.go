@@ -2,31 +2,28 @@ package dmarc
 
 import (
 	"errors"
-	"math"
 	"net"
 	"reflect"
+	"strings"
 	"testing"
 )
 
-// uris builds report URIs without size limits.
-func uris(ss ...string) []ReportURI {
-	out := make([]ReportURI, len(ss))
-	for i, s := range ss {
-		out[i] = ReportURI{URI: s, MaxSize: math.MaxUint64}
-	}
-	return out
-}
+// uris is its arguments, as a list of report URIs.
+func uris(ss ...string) []string { return ss }
 
-// TestAuthorizeReportURIs checks the RFC 7489 §7.1 verification of external
-// report destinations: URIs inside the policy's Organizational Domain pass
-// unchecked; others need a v=DMARC1 record at
+// TestAuthorizeReportURIs checks the RFC 9990 §4 verification of external
+// report destinations: URIs inside the policy's Organizational Domain (found
+// by a DNS Tree Walk, RFC 9989 §4.10.2) pass unchecked; others need a
+// v=DMARC1 record at
 // <policy domain>._report._dmarc.<host>; a confirming record's rua=/ruf= may
 // replace the URI, but only with URIs on the same host; and a DNS failure is
 // returned.
 //
-// checklist: DMARC-EXT-01 DMARC-EXT-02 DMARC-EXT-03 DMARC-EXT-04 DMARC-EXT-05 DMARC-EXT-06
+// checklist: DMARC-EXT-01 DMARC-EXT-02 DMARC-EXT-03 DMARC-EXT-04 DMARC-EXT-05 DMARC-EXT-06 DMARC-EXT-08
 func TestAuthorizeReportURIs(t *testing.T) {
 	zone := map[string][]string{
+		// example.test is its subdomains' Organizational Domain.
+		"_dmarc.example.test": {"v=DMARC1; p=reject"},
 		// Confirms, with no override.
 		"example.test._report._dmarc.reports.test": {"v=spf1 -all", "v=DMARC1"},
 		// Only non-DMARC records, or v=DMARC1 not first: not confirmed.
@@ -47,7 +44,9 @@ func TestAuthorizeReportURIs(t *testing.T) {
 	}
 	var queries []string
 	resolver := func(name string) ([]string, error) {
-		queries = append(queries, name)
+		if strings.Contains(name, "._report.") {
+			queries = append(queries, name)
+		}
 		if name == "example.test._report._dmarc.broken.test" {
 			return nil, &net.DNSError{Err: "server misbehaving", IsTemporary: true}
 		}
@@ -59,8 +58,8 @@ func TestAuthorizeReportURIs(t *testing.T) {
 	cases := []struct {
 		name  string
 		tag   string
-		in    []ReportURI
-		want  []ReportURI
+		in    []string
+		want  []string
 		query int
 	}{
 		{"same organizational domain", "rua", uris("mailto:dmarc@example.test", "mailto:dmarc@mail.example.test", "https://r.example.test/x"),
@@ -70,7 +69,7 @@ func TestAuthorizeReportURIs(t *testing.T) {
 		{"not confirmed (no record)", "rua", uris("mailto:dmarc@victim.test"), nil, 1},
 		{"not confirmed (no v=DMARC1 first)", "rua", uris("mailto:dmarc@notdmarc.test"), nil, 1},
 		{"override on the same host", "rua", uris("mailto:dmarc@override.test"),
-			[]ReportURI{{"mailto:a@override.test", 1 << 20}, {"mailto:b@override.test", math.MaxUint64}}, 1},
+			uris("mailto:a@override.test", "mailto:b@override.test"), 1},
 		{"override to another host", "rua", uris("mailto:dmarc@elsewhere.test"), nil, 1},
 		{"override of the other tag", "rua", uris("mailto:dmarc@rufonly.test"), uris("mailto:dmarc@rufonly.test"), 1},
 		{"override of this tag", "RUF", uris("mailto:dmarc@rufonly.test"), uris("mailto:f@rufonly.test"), 1},
@@ -79,10 +78,12 @@ func TestAuthorizeReportURIs(t *testing.T) {
 			uris("mailto:dmarc@example.test", "mailto:b@any.test"), 2},
 		{"encoded address and headers", "rua", uris("mailto:dmarc%40x@reports.test?subject=hi"), uris("mailto:dmarc%40x@reports.test?subject=hi"), 1},
 		{"no host", "rua", uris("mailto:nobody", "mailto:%zz@reports.test", "urn:isbn:1", "mailto:a@b..test", "%"), nil, 0},
+		// RFC 9990 §4 step 4: a name too long for the DNS cannot confirm anything.
+		{"name too long", "rua", uris("mailto:a@" + strings.Repeat("x", 60) + "." + strings.Repeat("y", 60) + "." + strings.Repeat("z", 60) + "." + strings.Repeat("w", 50) + ".test"), nil, 0},
 	}
 	for _, c := range cases {
 		queries = nil
-		got, err := AuthorizeReportURIs("example.test", c.tag, c.in, resolver, nil)
+		got, err := AuthorizeReportURIs("example.test", c.tag, c.in, resolver)
 		if err != nil || !reflect.DeepEqual(got, c.want) || len(queries) != c.query {
 			t.Errorf("%s: got %+v, %v after %d queries %q; want %+v after %d", c.name, got, err, len(queries), queries, c.want, c.query)
 		}
@@ -90,15 +91,34 @@ func TestAuthorizeReportURIs(t *testing.T) {
 
 	// The policy domain is queried as an A-label.
 	queries = nil
-	if got, err := AuthorizeReportURIs("Bücher.example", "rua", uris("mailto:d@reports.test"), resolver, nil); err != nil || len(got) != 1 {
+	if got, err := AuthorizeReportURIs("Bücher.example", "rua", uris("mailto:d@reports.test"), resolver); err != nil || len(got) != 1 {
 		t.Errorf("U-label policy domain: got %+v, %v (queries %q)", got, err, queries)
 	}
 	// A policy domain that is not a domain authorizes nothing.
-	if got, err := AuthorizeReportURIs("not a domain", "rua", uris("mailto:d@reports.test"), resolver, nil); err != nil || got != nil {
+	if got, err := AuthorizeReportURIs("not a domain", "rua", uris("mailto:d@reports.test"), resolver); err != nil || got != nil {
 		t.Errorf("bad policy domain: got %+v, %v", got, err)
 	}
+	// A DNS error while walking the tree for the policy domain, or for a
+	// destination host, is returned too.
+	walkErr := &net.DNSError{Err: "server misbehaving", IsTemporary: true}
+	failing := func(at string) TXTResolver {
+		return func(name string) ([]string, error) {
+			if name == at {
+				return nil, walkErr
+			}
+			return resolver(name)
+		}
+	}
+	if got, err := AuthorizeReportURIs("example.test", "rua", uris("mailto:a@reports.test"), failing("_dmarc.example.test")); !errors.Is(err, walkErr) || got != nil {
+		t.Errorf("policy walk error: got %+v, %v", got, err)
+	}
+	if got, err := AuthorizeReportURIs("example.test", "rua", uris("mailto:a@example.test", "mailto:b@reports.test"), failing("_dmarc.reports.test")); !errors.Is(err, walkErr) ||
+		!reflect.DeepEqual(got, uris("mailto:a@example.test")) {
+		t.Errorf("host walk error: got %+v, %v", got, err)
+	}
+
 	// A temporary DNS error is returned with the URIs checked so far.
-	got, err := AuthorizeReportURIs("example.test", "rua", uris("mailto:a@example.test", "mailto:b@broken.test", "mailto:c@any.test"), resolver, nil)
+	got, err := AuthorizeReportURIs("example.test", "rua", uris("mailto:a@example.test", "mailto:b@broken.test", "mailto:c@any.test"), resolver)
 	var dnsErr *net.DNSError
 	if !errors.As(err, &dnsErr) || !reflect.DeepEqual(got, uris("mailto:a@example.test")) {
 		t.Errorf("temporary error: got %+v, %v", got, err)

@@ -2,7 +2,6 @@ package dmarc
 
 import (
 	"fmt"
-	"math"
 	"reflect"
 	"testing"
 )
@@ -50,7 +49,7 @@ func TestNoRUANoAggregateDestinations(t *testing.T) {
 		}
 
 		r.queries = nil
-		dest, err := AuthorizeReportURIs(p.Domain, "rua", p.Record.RUA, r.lookup, nil)
+		dest, err := AuthorizeReportURIs(p.Domain, "rua", p.Record.RUA, r.lookup)
 		if err != nil || len(dest) != 0 {
 			t.Errorf("AuthorizeReportURIs for %q = %v, %v; want no destinations", txt, dest, err)
 		}
@@ -60,93 +59,56 @@ func TestNoRUANoAggregateDestinations(t *testing.T) {
 	}
 
 	// A record whose only rua= URI is invalid and whose p= is missing has no
-	// policy at all (§6.6.3 step 6), so there is nothing to report on.
+	// policy at all (RFC 9989 §4.10.1), so there is nothing to report on.
 	if _, err := ParseRecord("v=DMARC1; rua=not a uri"); err != ErrNoPolicy {
 		t.Errorf("ParseRecord without p= or a valid rua= = %v, want ErrNoPolicy", err)
 	}
 }
 
-// TestRUADeliveryOrderAndLimits checks what §7.2.1's delivery rule needs from
-// the record: the rua= URIs in the order published, each with its size limit
-// in bytes, so a reporter can try them in order and skip those too small for
-// the report (ExampleReportURI_delivery shows the loop).
+// TestRUADeliveryOrder checks what RFC 9989 §4.6 asks of a reporter, a
+// report to each listed URI, needs from the record: every valid rua= URI, in
+// the order published, the obsolete size limits dropped, and authorization
+// keeping that order (ExampleRecord_rua shows the loop).
 //
-// checklist: DMARC-AGG-09
-func TestRUADeliveryOrderAndLimits(t *testing.T) {
+// checklist: DMARC-AGG-09 DMARC-URI-05
+func TestRUADeliveryOrder(t *testing.T) {
 	rec, err := ParseRecord("v=DMARC1; p=none; rua=mailto:small@example.com!1k, https://reports.example.com/dmarc, mailto:big@example.com!10m, mailto:tiny@example.com!500")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []ReportURI{
-		{URI: "mailto:small@example.com", MaxSize: 1 << 10},
-		{URI: "https://reports.example.com/dmarc", MaxSize: math.MaxUint64},
-		{URI: "mailto:big@example.com", MaxSize: 10 << 20},
-		{URI: "mailto:tiny@example.com", MaxSize: 500},
-	}
+	want := []string{"mailto:small@example.com", "https://reports.example.com/dmarc", "mailto:big@example.com", "mailto:tiny@example.com"}
 	if !reflect.DeepEqual(rec.RUA, want) {
 		t.Fatalf("RUA = %v, want %v", rec.RUA, want)
 	}
-
-	// Authorization keeps the order and the limits of the URIs it keeps.
-	dest, err := AuthorizeReportURIs("example.com", "rua", rec.RUA, (&tracingResolver{}).lookup, nil)
+	zone := &tracingResolver{zone: map[string][]string{"_dmarc.example.com": {"v=DMARC1; p=none"}}}
+	dest, err := AuthorizeReportURIs("example.com", "rua", rec.RUA, zone.lookup)
 	if err != nil || !reflect.DeepEqual(dest, want) {
 		t.Fatalf("AuthorizeReportURIs = %v, %v; want %v", dest, err, want)
 	}
-
-	for _, tc := range []struct {
-		size uint64
-		want []string
-	}{
-		{size: 500, want: []string{"mailto:small@example.com", "https://reports.example.com/dmarc", "mailto:big@example.com", "mailto:tiny@example.com"}},
-		{size: 501, want: []string{"mailto:small@example.com", "https://reports.example.com/dmarc", "mailto:big@example.com"}},
-		{size: 1 << 10, want: []string{"mailto:small@example.com", "https://reports.example.com/dmarc", "mailto:big@example.com"}},
-		{size: 1<<10 + 1, want: []string{"https://reports.example.com/dmarc", "mailto:big@example.com"}},
-		{size: 10<<20 + 1, want: []string{"https://reports.example.com/dmarc"}},
-	} {
-		if got := deliveryTargets(dest, tc.size); !reflect.DeepEqual(got, tc.want) {
-			t.Errorf("a %d-byte report goes to %v, want %v", tc.size, got, tc.want)
-		}
-	}
 }
 
-// deliveryTargets is the §7.2.1 rule a reporter applies to the URIs: every
-// one, in order, except those whose size limit the report exceeds.
-func deliveryTargets(uris []ReportURI, size uint64) []string {
-	var out []string
-	for _, u := range uris {
-		if size > u.MaxSize {
-			continue
-		}
-		out = append(out, u.URI)
-	}
-	return out
-}
-
-// ExampleReportURI_delivery sends a report to each rua= URI in the order
-// published, skipping the URIs whose size limit it exceeds (§7.2.1).
+// ExampleRecord_rua sends a report to each rua= URI, in the order published
+// (RFC 9989 §4.6); a size limit a record still carries is not a reason to
+// skip one.
 //
 // checklist: DMARC-AGG-09
-func ExampleReportURI_delivery() {
+func ExampleRecord_rua() {
 	rec, err := ParseRecord("v=DMARC1; p=none; rua=mailto:a@example.com!2k, mailto:b@example.com!50k, mailto:c@example.com")
 	if err != nil {
 		panic(err)
 	}
-	report := make([]byte, 4096) // the gzipped report
-	for _, u := range rec.RUA {
-		if uint64(len(report)) > u.MaxSize {
-			fmt.Println("skip", u.URI)
-			continue
-		}
-		fmt.Println("send to", u.URI)
+	for _, uri := range rec.RUA {
+		fmt.Println("send to", uri)
 	}
 	// Output:
-	// skip mailto:a@example.com
+	// send to mailto:a@example.com
 	// send to mailto:b@example.com
 	// send to mailto:c@example.com
 }
 
-// TestDiscoverWithoutOneFromDomain checks §6.6.1's edge: a message with no
-// From domain, several, or a group address has no single domain to look up.
+// TestDiscoverWithoutOneFromDomain checks RFC 9989 §5.3.1's edge: a message
+// with no From domain, several, or a group address has no single domain to
+// look up.
 // Given anything that is not one domain, Discover applies no policy and
 // queries no DNS, so such mail is left to the caller's local policy.
 //

@@ -6,6 +6,70 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+go-dmarc follows DMARCbis, which obsoleted RFC 7489 in May 2026
+(rest-mail/rest-mail-server#730): RFC 9989 for the receiver and RFC 9990 for
+aggregate reports. CHECKLIST.md is now an RFC 9989 and RFC 9990 checklist.
+
+### Breaking
+
+- **The Organizational Domain comes from the DNS Tree Walk** (RFC 9989
+  §4.10, §4.10.2), not from a Public Suffix List. `OrgDomainFunc`,
+  `DefaultOrgDomain`, `Aligned` and `AlignedOrg` are gone; `OrgDomain(domain,
+  resolver)` finds it, and `AlignedMode(auth, from, mode, resolver)` and
+  `AuthorizeReportURIs(domain, tag, uris, resolver)` take a resolver instead
+  of an `OrgDomainFunc`. `AlignedMode` returns an error for a DNS failure.
+- **`Discover(domain, resolver, exists)`** walks the tree when the Author
+  Domain has no record and applies its Organizational Domain's record, or
+  else its Public Suffix Domain's (`Policy.PSD`); `Policy.ViaOrgDomain` is
+  now `Policy.Inherited`. Several records at one name are discarded and the
+  walk goes on, where RFC 7489 ended discovery. `exists`, an `ExistsFunc`,
+  says whether the Author Domain exists, for `np=`.
+- **`Policy.Applied`** is the policy to apply: `Requested` one level lower
+  when the record asks for test mode (`t=y`).
+- **`Record`** gains `NonExistentPolicy` (`np=`), `PSD` (`psd=`) and
+  `Testing` (`t=`), and loses `Pct`, `ReportFormats` and `ReportInterval`:
+  `pct=`, `rf=` and `ri=` are unknown tags now, and ignored. An invalid `np=`
+  leaves the record without a policy, as an invalid `sp=` does.
+- **Report URIs are strings.** `Record.RUA` and `Record.RUF` are `[]string`;
+  `ReportURI` and its `MaxSize` are gone, since RFC 9989 makes the `!` size
+  limit obsolete. A URI that carries one is still read, without it.
+- **`fo=`** follows RFC 9989's grammar: `0` and `1` exclude each other, and
+  `d` and `s` appear at most once; any other list takes the default `0`.
+
+- **Aggregate reports follow RFC 9990.** The root element is in the
+  `urn:ietf:params:xml:ns:dmarc-2.0` namespace (`Namespace`), and the report
+  validates against RFC 9990's Appendix A schema:
+  - `policy_published` has `np`, `testing` and `discovery_method` (`treewalk`
+    from `NewPolicyPublished`), and no `pct`; `PolicyPublished.PCT` is gone.
+    Every value from `p` on is written, with its default when empty.
+  - `ReportMetadata` gains `ExtraContactInfo`, `Error` and `Generator`.
+  - `AggregateRecord.SPF` is one `*SPFAuth`, the MAIL FROM result, written
+    with the mfrom scope, or nil, and then no `spf` element is written;
+    `SPFAuth.Scope` is gone. `envelope_from` is left out when unknown, and
+    `AggregateRecord.EnvelopeTo` writes `envelope_to`.
+  - A row reports at most 100 DKIM results, the passing ones in strict
+    alignment first, then relaxed, the other passing ones and the failing
+    ones (§3.1.3); the selector is always written.
+  - The override types are RFC 9990's: `PolicyOverridePolicyTestMode` is
+    added, and `PolicyOverrideForwarded` and `PolicyOverrideSampledOut` are
+    gone (those values are reported as `other`, keeping the text). A
+    disposition may be `pass`.
+  - IPv6 source addresses are written as RFC 3986 does, compressed.
+- **`ReportFilename` and `ReportSubject`** build the attachment's name and the
+  message's Subject of RFC 9990 §3.5.2.
+- **`AuthorizeReportURIs`** follows RFC 9990 §4, and drops a URI whose
+  `_report._dmarc` name is too long for the DNS.
+
+### Changed
+
+- The tests run RFC 9989's Appendix B examples, including the three Tree
+  Walks of B.4. The Public Suffix List fixture and its test are gone.
+
+## [0.4.1] - 2026-10-22
+
+0.4.0 (2026-10-17) shipped all of this except the RFC 8616 §6 rule for
+report addresses (#41) and the further checklist rows (#37 to #40).
+
 go-dmarc now meets the standard of rest-mail/rest-mail-server#374: an RFC
 7489 checklist checked in CI, a 95% coverage gate, fuzzing, the RFC's examples
 as tests, and differential tests against go-msgauth. Writing the checklist
