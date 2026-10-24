@@ -216,7 +216,7 @@ func FuzzDiscover(f *testing.F) {
 			t.Fatalf("requested %q is not the record's", p.Requested)
 		}
 		lower := map[string]string{"reject": "quarantine", "quarantine": "none", "none": "none"}
-		if p.Applied != p.Requested && !(rec.Testing && p.Applied == lower[p.Requested]) {
+		if p.Applied != p.Requested && (!rec.Testing || p.Applied != lower[p.Requested]) {
 			t.Fatalf("applied %q for requested %q, testing %v", p.Applied, p.Requested, rec.Testing)
 		}
 	})
