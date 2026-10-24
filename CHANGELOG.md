@@ -6,10 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
-The receiver side follows RFC 9989, which obsoleted RFC 7489 in May 2026
-(rest-mail/rest-mail-server#730). Aggregate reports keep RFC 7489's format
-until they move to RFC 9990, before this is released. CHECKLIST.md is now an
-RFC 9989 checklist for the receiver.
+go-dmarc follows DMARCbis, which obsoleted RFC 7489 in May 2026
+(rest-mail/rest-mail-server#730): RFC 9989 for the receiver and RFC 9990 for
+aggregate reports. CHECKLIST.md is now an RFC 9989 and RFC 9990 checklist.
 
 ### Breaking
 
@@ -37,10 +36,32 @@ RFC 9989 checklist for the receiver.
 - **`fo=`** follows RFC 9989's grammar: `0` and `1` exclude each other, and
   `d` and `s` appear at most once; any other list takes the default `0`.
 
+- **Aggregate reports follow RFC 9990.** The root element is in the
+  `urn:ietf:params:xml:ns:dmarc-2.0` namespace (`Namespace`), and the report
+  validates against RFC 9990's Appendix A schema:
+  - `policy_published` has `np`, `testing` and `discovery_method` (`treewalk`
+    from `NewPolicyPublished`), and no `pct`; `PolicyPublished.PCT` is gone.
+    Every value from `p` on is written, with its default when empty.
+  - `ReportMetadata` gains `ExtraContactInfo`, `Error` and `Generator`.
+  - `AggregateRecord.SPF` is one `*SPFAuth`, the MAIL FROM result, written
+    with the mfrom scope, or nil, and then no `spf` element is written;
+    `SPFAuth.Scope` is gone. `envelope_from` is left out when unknown, and
+    `AggregateRecord.EnvelopeTo` writes `envelope_to`.
+  - A row reports at most 100 DKIM results, the passing ones in strict
+    alignment first, then relaxed, the other passing ones and the failing
+    ones (§3.1.3); the selector is always written.
+  - The override types are RFC 9990's: `PolicyOverridePolicyTestMode` is
+    added, and `PolicyOverrideForwarded` and `PolicyOverrideSampledOut` are
+    gone (those values are reported as `other`, keeping the text). A
+    disposition may be `pass`.
+  - IPv6 source addresses are written as RFC 3986 does, compressed.
+- **`ReportFilename` and `ReportSubject`** build the attachment's name and the
+  message's Subject of RFC 9990 §3.5.2.
+- **`AuthorizeReportURIs`** follows RFC 9990 §4, and drops a URI whose
+  `_report._dmarc` name is too long for the DNS.
+
 ### Changed
 
-- `policy_published` reports `pct` as 100, the share of failing messages a
-  policy now applies to, until the RFC 9990 format drops the element.
 - The tests run RFC 9989's Appendix B examples, including the three Tree
   Walks of B.4. The Public Suffix List fixture and its test are gone.
 

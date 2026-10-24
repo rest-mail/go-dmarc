@@ -223,23 +223,23 @@ func FuzzDiscover(f *testing.F) {
 }
 
 // FuzzBuildReport builds a report from any field values: BuildReport never
-// panics, and a report it returns validates against the Appendix C schema and
-// reads back with the same rows.
+// panics, and a report it returns validates against RFC 9990's Appendix A
+// schema and reads back with the same rows.
 //
 // checklist: DMARC-XML-02 DMARC-XML-06
 func FuzzBuildReport(f *testing.F) {
 	f.Add("example.test", "192.0.2.1", "reject", "pass", "fail", "mfrom", "sel", "sampled_out", "r", "1")
 	f.Add("<&>", "2001:db8::1", "Quarantine", "weird", "SoftFail", "helo", "", "arc", "s", "")
 	f.Add("\x00￾\x1b", "::ffff:10.0.0.1", "", "", "", "", "\xff", "", "", "0:1")
-	f.Fuzz(func(t *testing.T, domain, ip, disposition, dkimResult, spfResult, scope, selector, reason, adkim, fo string) {
+	f.Fuzz(func(t *testing.T, domain, ip, disposition, dkimResult, spfResult, mode, selector, reason, adkim, fo string) {
 		recs := []AggregateRecord{{
-			Domain: domain, SourceIP: ip, HeaderFrom: domain, Disposition: disposition, EnvelopeFrom: selector,
-			DKIM:    []DKIMAuth{{Domain: domain, Selector: selector, Result: dkimResult, Aligned: true}},
-			SPF:     []SPFAuth{{Domain: domain, Scope: scope, Result: spfResult}},
+			Domain: domain, SourceIP: ip, HeaderFrom: domain, Disposition: disposition, EnvelopeFrom: selector, EnvelopeTo: mode,
+			DKIM:    []DKIMAuth{{Domain: domain, Selector: selector, Result: dkimResult, Aligned: true}, {Domain: selector, Result: dkimResult}},
+			SPF:     &SPFAuth{Domain: domain, Result: spfResult},
 			Reasons: []PolicyOverrideReason{{Type: reason, Comment: selector}},
 		}, {Domain: domain, SourceIP: ip, Disposition: disposition}}
-		policy := PolicyPublished{Domain: domain, ADKIM: adkim, ASPF: adkim, P: disposition, SP: disposition, FO: fo}
-		out, err := BuildReport(ReportMetadata{OrgName: domain, Email: selector, ReportID: reason}, policy, recs)
+		policy := PolicyPublished{Domain: domain, DiscoveryMethod: reason, ADKIM: adkim, ASPF: adkim, P: disposition, SP: disposition, NP: fo, FO: fo, Testing: mode}
+		out, err := BuildReport(ReportMetadata{OrgName: domain, Email: selector, ReportID: reason, Error: dkimResult, Generator: mode}, policy, recs)
 		if err != nil {
 			if _, ok := reportIP(ip); ok {
 				t.Fatalf("BuildReport failed for a valid IP: %v", err)

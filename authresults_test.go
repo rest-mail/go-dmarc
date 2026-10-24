@@ -8,9 +8,9 @@ import (
 // TestAuthResults_ReportsAuthenticatingDomains is the issue #6 regression: the
 // auth_results section must report the DKIM signature's d= domain and the
 // SPF-checked domain, not the header-From domain, and must report every DKIM
-// signature (RFC 7489 §7.2, Appendix C).
+// signature (RFC 9990 §3.1.1.11), the aligned passing one first (§3.1.3).
 //
-// checklist: DMARC-AGG-02 DMARC-DISC-12
+// checklist: DMARC-AGG-02 DMARC-DISC-12 DMARC-XML-14 DMARC-AGG-26
 func TestAuthResults_ReportsAuthenticatingDomains(t *testing.T) {
 	rec := AggregateRecord{
 		Domain:      "example.test", // header-From / reported-on domain
@@ -21,9 +21,7 @@ func TestAuthResults_ReportsAuthenticatingDomains(t *testing.T) {
 			{Domain: "thirdparty-signer.net", Selector: "sel1", Result: "pass", Aligned: false},
 			{Domain: "example.test", Selector: "sel2", Result: "pass", Aligned: true},
 		},
-		SPF: []SPFAuth{
-			{Domain: "bounce.marketing.net", Scope: "mfrom", Result: "pass", Aligned: false},
-		},
+		SPF: &SPFAuth{Domain: "bounce.marketing.net", Result: "pass", Aligned: false},
 	}
 	rows := AggregateRecords([]AggregateRecord{rec})
 	if len(rows) != 1 {
@@ -35,22 +33,23 @@ func TestAuthResults_ReportsAuthenticatingDomains(t *testing.T) {
 	if len(ar.DKIM) != 2 {
 		t.Fatalf("want 2 dkim entries (one per signature), got %d: %+v", len(ar.DKIM), ar.DKIM)
 	}
-	if ar.DKIM[0].Domain != "thirdparty-signer.net" || ar.DKIM[0].Selector != "sel1" {
-		t.Errorf("dkim[0] = %+v, want d=thirdparty-signer.net s=sel1 (the signature's own domain, not header-From)", ar.DKIM[0])
+	if ar.DKIM[0].Domain != "example.test" || ar.DKIM[0].Selector != "sel2" {
+		t.Errorf("dkim[0] = %+v, want d=example.test s=sel2, the passing signature in strict alignment", ar.DKIM[0])
 	}
-	if ar.DKIM[1].Domain != "example.test" || ar.DKIM[1].Selector != "sel2" {
-		t.Errorf("dkim[1] = %+v, want d=example.test s=sel2", ar.DKIM[1])
+	if ar.DKIM[1].Domain != "thirdparty-signer.net" || ar.DKIM[1].Selector != "sel1" {
+		t.Errorf("dkim[1] = %+v, want d=thirdparty-signer.net s=sel1 (the signature's own domain, not header-From)", ar.DKIM[1])
 	}
 
-	// The SPF entry must carry the checked domain and scope, not the From domain.
-	if len(ar.SPF) != 1 {
-		t.Fatalf("want 1 spf entry, got %d: %+v", len(ar.SPF), ar.SPF)
+	// The SPF entry must carry the checked domain and the mfrom scope, not the
+	// From domain.
+	if ar.SPF == nil {
+		t.Fatal("want an spf entry")
 	}
-	if ar.SPF[0].Domain != "bounce.marketing.net" {
-		t.Errorf("spf.Domain = %q, want the checked domain bounce.marketing.net (not the header-From domain)", ar.SPF[0].Domain)
+	if ar.SPF.Domain != "bounce.marketing.net" {
+		t.Errorf("spf.Domain = %q, want the checked domain bounce.marketing.net (not the header-From domain)", ar.SPF.Domain)
 	}
-	if ar.SPF[0].Scope != "mfrom" {
-		t.Errorf("spf.Scope = %q, want mfrom", ar.SPF[0].Scope)
+	if ar.SPF.Scope != "mfrom" {
+		t.Errorf("spf.Scope = %q, want mfrom", ar.SPF.Scope)
 	}
 
 	// policy_evaluated is still the DMARC-aligned verdict: the aligned DKIM
@@ -61,13 +60,13 @@ func TestAuthResults_ReportsAuthenticatingDomains(t *testing.T) {
 }
 
 // TestAuthResults_OmitsDKIMWhenUnsigned checks that an unsigned message produces
-// no <dkim> element at all (RFC 7489 Appendix C: dkim is minOccurs="0").
+// no <dkim> element at all (RFC 9990 Appendix A: dkim is minOccurs="0").
 //
 // checklist: DMARC-XML-05
 func TestAuthResults_OmitsDKIMWhenUnsigned(t *testing.T) {
 	rec := AggregateRecord{
 		Domain: "example.test", SourceIP: "192.0.2.2", HeaderFrom: "example.test", Disposition: "none",
-		SPF: []SPFAuth{{Domain: "example.test", Scope: "mfrom", Result: "pass", Aligned: true}},
+		SPF: &SPFAuth{Domain: "example.test", Result: "pass", Aligned: true},
 	}
 	rows := AggregateRecords([]AggregateRecord{rec})
 	if n := len(rows[0].AuthResults.DKIM); n != 0 {

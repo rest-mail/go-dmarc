@@ -1,11 +1,11 @@
-# RFC 9989 checklist
+# RFC 9989 and RFC 9990 checklist
 
 An inventory of [RFC 9989](https://www.rfc-editor.org/rfc/rfc9989)
 requirements on a DMARC Mail Receiver (the record, policy discovery, the DNS
-Tree Walk, identifier alignment and applying the policy), and of the RFC 7489
-requirements on a report generator (aggregate reports, failure reports and
-their destinations) that the library still implements, item by item, with the
-tests that cover it. The list tracks MUST, MUST NOT, SHOULD, SHOULD NOT,
+Tree Walk, identifier alignment and applying the policy), and of
+[RFC 9990](https://www.rfc-editor.org/rfc/rfc9990) requirements on a report
+generator (aggregate reports and their external destinations), item by item,
+with the tests that cover it. The list tracks MUST, MUST NOT, SHOULD, SHOULD NOT,
 RECOMMENDED and REQUIRED obligations on receivers and reporters, the MAYs the
 library implements, and the normative behaviour that carries no keyword (level
 "Normative"), such as the record grammar of §4.8 and the Tree Walk of §4.10.
@@ -18,15 +18,15 @@ policy, or the library sends no mail, say) says "n/a" and why. CI checks this
 file against the tests with `go run ./internal/checklist`; the format is
 described in the [README](README.md#the-rfc-checklist).
 
-## Which RFC: RFC 9989 for the receiver, RFC 7489 for reports so far
+## Which RFC: DMARCbis, not RFC 7489
 
 In May 2026 RFC 7489 was obsoleted by DMARCbis:
 [RFC 9989](https://www.rfc-editor.org/rfc/rfc9989) (the protocol),
 [RFC 9990](https://www.rfc-editor.org/rfc/rfc9990) (aggregate reports) and
 [RFC 9991](https://www.rfc-editor.org/rfc/rfc9991) (failure reports). The
-receiver side follows RFC 9989. Aggregate reports, and the check of their
-external destinations, still follow RFC 7489 §7 and Appendix C, until they
-move to RFC 9990 in the same release. What changed for a receiver:
+receiver side follows RFC 9989, and aggregate reports and the check of their
+external destinations follow RFC 9990. Failure reports are not generated.
+What changed:
 
 | Area | RFC 7489 (before) | RFC 9989 (now) |
 |------|-------------------|----------------|
@@ -36,6 +36,9 @@ move to RFC 9990 in the same release. What changed for a receiver:
 | Tags | `pct`, `rf`, `ri` are read. | `pct`, `rf` and `ri` are removed, so ignored as unknown tags (DMARC-REC-11); `np` (non-existent subdomains), `psd` and `t` (test mode) are added (DMARC-REC-19 to -21). |
 | `fo=` (DMARC-REC-13) | Any list of 0, 1, d and s. | 0 and 1 exclude each other, and d and s appear at most once. |
 | Report URIs (DMARC-URI-02) | A `!` size limit is honoured. | The size limit is obsolete and ignored. |
+| Report format (DMARC-XML-02, -11) | The Appendix C schema, no namespace. | RFC 9990's Appendix A schema, in the `urn:ietf:params:xml:ns:dmarc-2.0` namespace, with `np`, `testing`, `discovery_method` and `generator`, and no `pct`. |
+| Report contents (DMARC-XML-04, -07, -09) | One or more SPF results, helo or mfrom; IPv6 in eight groups; `forwarded` and `sampled_out` reasons. | At most one SPF result, mfrom; IPv6 as RFC 3986 writes it; a `policy_test_mode` reason; a `pass` disposition; at most 100 DKIM results a row, by preference (DMARC-AGG-25). |
+| Report delivery (DMARC-AGG-13, -15) | Error reports for undeliverable reports. | No error reports; the attachment's name and the Subject follow §3.5.2's ABNF (`ReportFilename`, `ReportSubject`). |
 
 ## Section audit (2026-10-24)
 
@@ -54,10 +57,24 @@ unsupported by owner decision; this audit adds no such feature.
 | 5.1, 5.2 | Domain Owner and PSO actions; obligations on publishers only. |
 | 5.3.1–5.3.9 | Mail Receiver actions: DISC-01, -11, -12, -14, -16 to -18; AGG-07. |
 | 5.4 | Policy enforcement: POL rows. |
-| 6 | Feedback is RFC 9990's. |
+| 6 | Feedback is RFC 9990's; see its audit below. |
 | 7.1–7.6 | Other topics; §7.4's receiver obligations are POL-14 and POL-15. |
 | 8–11 | Minimum implementations (Domain Owner side), privacy, IANA and security considerations; no further receiver obligations a library can meet. |
 | A–C | Design notes, examples and changes; Appendix B's examples are tests (`rfc_test.go`), Appendix A.6's test mode is DMARC-REC-21. |
+
+Reviewed RFC 9990 §§1–9 and Appendices A–C the same way, for obligations on
+a report generator:
+
+| Sections audited | Result |
+|------------------|--------|
+| 1–2 | Introduction and status; no obligations. |
+| 3.1, 3.1.1–3.1.6 | The report's contents and format: AGG-01 to -05, -23, -25, -26 and the XML rows; §3.1.1's MAY and SHOULD on evaluating reports are the Report Consumer's. |
+| 3.2, 5 | Extensions: XML-15; the library writes none. |
+| 3.3, 3.4 | Policy changes during a period and report request discovery; no further obligations. |
+| 3.5, 3.5.1–3.5.4 | Delivery: AGG-08, -09, -11 to -15, -18, -19, -24. |
+| 4 | External destinations: EXT rows. |
+| 6–9 | IANA, privacy, security and operational considerations; §7.3's limit on PSD feedback concerns failure reports, which the library does not generate. |
+| A–C | The schema (`schema_test.go` encodes it), the sample report and the differences from RFC 7489. |
 
 ## Records (§4.5, §4.7, §4.8)
 
@@ -147,69 +164,69 @@ records. Custom `TXTResolver` implementations must preserve that contract.
 | DMARC-POL-14 | 5.4, 7.4 | MUST NOT | Reject mail solely because of a published p=reject; use other knowledge and analysis too. | n/a: the caller's disposition; the library reports the published policy. |
 | DMARC-POL-15 | 7.4 | MUST | Without other knowledge and analysis, treat mail failing a p=reject policy as if the policy were p=quarantine. | n/a: the caller's disposition. |
 
-## Verifying external destinations (RFC 7489 §7.1)
+## Verifying external destinations (RFC 9990 §4)
 
 | ID | Section | Level | Requirement | Tests |
 |----|---------|-------|-------------|-------|
-| DMARC-EXT-01 | RFC 7489 7.1 | Normative | A report URI whose host's Organizational Domain differs from the policy's is checked at <policy domain, as an A-label>._report._dmarc.<host>. | `TestAuthorizeReportURIs`, `TestRFC9989ThirdPartyExample` |
-| DMARC-EXT-02 | RFC 7489 7.1 | MUST | A confirming record starts with v=DMARC1; other records are discarded. | `TestAuthorizeReportURIs` |
-| DMARC-EXT-03 | RFC 7489 7.1 | MUST | Ignore a URI whose external destination is not confirmed. | `TestAuthorizeReportURIs`, `TestRFC9989ThirdPartyExample` |
-| DMARC-EXT-04 | RFC 7489 7.1 | Normative | A rua= or ruf= in the confirming record replaces the URI. | `TestAuthorizeReportURIs`, `TestRFC9989ThirdPartyExample` |
-| DMARC-EXT-05 | RFC 7489 7.1 | MUST | An overriding URI uses the same destination host; otherwise neither it nor the original is used. | `TestAuthorizeReportURIs` |
-| DMARC-EXT-06 | RFC 7489 7.1 | MAY | A temporary DNS error lets the caller try the check again later. | `TestAuthorizeReportURIs` |
-| DMARC-EXT-07 | RFC 7489 12.5 | SHOULD | Use the external-reporting verification mechanism of §7.1. | n/a: the caller must invoke AuthorizeReportURIs before external delivery; BuildReport constructs XML without sending or choosing destinations. |
+| DMARC-EXT-01 | RFC 9990 4 | MUST | A report URI whose host's Organizational Domain differs from the policy domain's is checked at <policy domain, as an A-label>._report._dmarc.<host>. | `TestAuthorizeReportURIs`, `TestRFC9989ThirdPartyExample` |
+| DMARC-EXT-02 | RFC 9990 4 | MUST | A confirming record starts with v=DMARC1; other records are discarded. | `TestAuthorizeReportURIs` |
+| DMARC-EXT-03 | RFC 9990 4 | MUST | Ignore a URI whose external destination is not confirmed. | `TestAuthorizeReportURIs`, `TestRFC9989ThirdPartyExample` |
+| DMARC-EXT-04 | RFC 9990 4 | Normative | A rua= or ruf= in the confirming record replaces the URI. | `TestAuthorizeReportURIs`, `TestRFC9989ThirdPartyExample` |
+| DMARC-EXT-05 | RFC 9990 4 | MUST | An overriding URI uses the same destination host; otherwise neither it nor the original is used. | `TestAuthorizeReportURIs` |
+| DMARC-EXT-06 | RFC 9990 4 | MAY | A temporary DNS error lets the caller try the check again later. | `TestAuthorizeReportURIs` |
+| DMARC-EXT-07 | RFC 9990 4 | MUST | Take the verification steps before sending to an external destination. | n/a: the caller must invoke AuthorizeReportURIs before external delivery; BuildReport constructs XML without sending or choosing destinations. |
+| DMARC-EXT-08 | RFC 9990 4 | Normative | When the name to query exceeds DNS limits, the destination cannot be confirmed. | `TestAuthorizeReportURIs` |
 
-## Aggregate reports (RFC 7489 §7.2)
+## Aggregate reports (RFC 9990 §3.1, §3.5)
 
 | ID | Section | Level | Requirement | Tests |
 |----|---------|-------|-------------|-------|
-| DMARC-AGG-01 | RFC 7489 7.2 | SHOULD | Include the DMARC policy discovered and applied. | `TestBuildReportPolicyPublished` |
-| DMARC-AGG-02 | RFC 7489 7.2 | SHOULD | Include the disposition, the identifiers SPF and DKIM evaluated with their results, and whether each was aligned. | `TestAuthResults_ReportsAuthenticatingDomains`, `TestBuildReport_SchemaConformance` |
-| DMARC-AGG-03 | RFC 7489 7.2 | SHOULD | Report each subdomain's mail apart from the Organizational Domain's. | `TestAggregateRecordsSeparatesSubdomains` |
-| DMARC-AGG-04 | RFC 7489 7.2 | SHOULD | Include the policy requested and the policy applied, if they differ. | `TestBuildReportOverrideReasons` |
-| DMARC-AGG-05 | RFC 7489 7.2 | SHOULD | Count all messages received, even those other filters block. | `TestAggregateRecords_GroupsAndCounts`, `TestBuildReportSamplingKeepsAllMessages` |
-| DMARC-AGG-06 | RFC 7489 7.2 | SHOULD | Keep reporting periods on hour boundaries (daily ones starting at 00:00 UTC). | n/a: the caller chooses the period (DateRange). |
+| DMARC-AGG-01 | RFC 9990 3.1 | Normative | Include the DMARC policy discovered and applied. | `TestBuildReportPolicyPublished` |
+| DMARC-AGG-02 | RFC 9990 3.1 | Normative | Include the disposition, the identifiers SPF and DKIM evaluated with their results, and whether each was aligned. | `TestAuthResults_ReportsAuthenticatingDomains`, `TestBuildReport_SchemaConformance` |
+| DMARC-AGG-03 | RFC 9990 3.1.2 | Normative | Each RFC5322.From domain under one DMARC Policy Domain gets records of its own. | `TestAggregateRecordsSeparatesSubdomains` |
+| DMARC-AGG-04 | RFC 9990 3.1.1.9 | MUST | When alignment fails and the policy applied differs from the one published, the reason is included. | `TestBuildReportOverrideReasons` |
+| DMARC-AGG-05 | RFC 9990 3.1 | Normative | Count all messages received, even those other filters block. | `TestAggregateRecords_GroupsAndCounts`, `TestBuildReportKeepsAllMessages` |
+| DMARC-AGG-06 | RFC 9990 3.1.1.4 | SHOULD NOT | Let reporting periods overlap. | n/a: the caller chooses the period (DateRange). |
 | DMARC-AGG-07 | 5.3.8 | SHOULD | Generate and send aggregate reports at least once every 24 hours. | n/a: scheduling is the caller's. |
-| DMARC-AGG-08 | RFC 7489 7.2.1 | SHOULD | Use a secure transport. | n/a: the library sends nothing. |
-| DMARC-AGG-09 | 4.6 | SHOULD | Send the report to each listed URI, in the order published. | `TestRUADeliveryOrder`, `ExampleRecord_rua` |
-| DMARC-AGG-10 | RFC 7489 7.2.1, 7.2.2 | SHOULD | When no URI can take the report, send a short error report. | n/a: the library sends nothing. |
-| DMARC-AGG-11 | RFC 7489 7.2.1.1 | MUST | Send the report as a MIME message with the XML in one part. | n/a: the caller builds the message. |
-| DMARC-AGG-12 | RFC 7489 7.2.1.1 | SHOULD | Compress the XML with gzip (application/gzip). | `TestGzip_RoundTrip` |
-| DMARC-AGG-13 | RFC 7489 7.2.1.1 | MUST | Name the file with the extension xml, or xml.gz when compressed. | n/a: the caller builds the message. |
-| DMARC-AGG-14 | RFC 7489 7.2.1.1 | MUST | Send report mail that passes DMARC with an aligned identifier. | n/a: the caller signs and sends the message. |
-| DMARC-AGG-15 | RFC 7489 7.2.1.1 | SHOULD | Give the report's Subject the form of the ABNF. | n/a: the caller builds the message. |
-| DMARC-AGG-16 | RFC 7489 7.2.2 | MUST | Format an error report per MIME, with a text/plain part of field-value pairs, and send it to every mailto: URI. | n/a: the library sends nothing. |
-| DMARC-AGG-18 | RFC 7489 7.2.1.1 | SHOULD | Label compressed aggregate data application/gzip and uncompressed data text/xml. | n/a: the caller builds MIME parts and chooses their Content-Type; Gzip returns bytes only. |
-| DMARC-AGG-19 | RFC 7489 7.2.1.1 | MUST | Encode the aggregate data as an XML file, including when it is gzip-compressed for delivery. | `TestAggregateAttachmentXML` |
-| DMARC-AGG-20 | RFC 7489 7.2.2 | MUST | Set an error report's Report-Size to the actual number of bytes attempted on that transport. | n/a: the caller sends reports and constructs delivery-error messages; the library cannot observe transport encoding or attempted byte counts. |
-| DMARC-AGG-21 | RFC 7489 7.2.2 | MUST | Generate separate delivery-error reports when attempted sizes differ between transports. | n/a: the caller tracks delivery attempts and constructs delivery-error messages. |
-| DMARC-AGG-22 | RFC 7489 7.2.2 | MUST | Include Report-Date, Report-Domain, Report-ID, Report-Size, Submitter and Submitting-URI in the delivery-error report. | n/a: the caller constructs delivery-error MIME messages; the library builds successful aggregate-report XML only. |
+| DMARC-AGG-08 | RFC 9990 3.5 | SHOULD | Use a secure transport. | n/a: the library sends nothing. |
+| DMARC-AGG-09 | RFC 9990 3.5; 4.6 | MUST | Evaluate the report URIs in the order given, ignore malformed ones, and attempt delivery to every other one. | `TestRUADeliveryOrder`, `ExampleRecord_rua` |
+| DMARC-AGG-11 | RFC 9990 3.5.2 | MUST | Send the report as an RFC 5322 message formatted per RFC 2045, with the XML in one part. | n/a: the caller builds the message. |
+| DMARC-AGG-12 | RFC 9990 3.5.2 | SHOULD | Compress the XML with gzip. | `TestGzip_RoundTrip` |
+| DMARC-AGG-13 | RFC 9990 3.5.2 | MUST | Name the attachment receiver!policy-domain!begin!end, with an optional !unique-id, and the extension xml or xml.gz, and keep the name when the report is sent again. | `TestReportFilename` |
+| DMARC-AGG-14 | RFC 9990 3.5.2 | MUST | Send report mail that passes DMARC with an aligned identifier. | n/a: the caller signs and sends the message. |
+| DMARC-AGG-15 | RFC 9990 3.5.2 | MUST | Give the report's Subject the form of the ABNF. | `TestReportSubject` |
+| DMARC-AGG-18 | RFC 9990 3.5.2 | MUST | Label compressed aggregate data application/gzip and uncompressed data text/xml. | n/a: the caller builds MIME parts and chooses their Content-Type; Gzip returns bytes only. |
+| DMARC-AGG-19 | RFC 9990 3.5.2 | MUST | Encode the aggregate data as an XML file, including when it is gzip-compressed for delivery. | `TestAggregateAttachmentXML` |
+| DMARC-AGG-23 | RFC 9990 3.1 | MUST | Generate one report for each DMARC Policy Domain, holding one policy configuration. | n/a: the caller groups the records into reports; BuildReport writes the one policy_published it is given. |
+| DMARC-AGG-24 | RFC 9990 3.5.1, 3.5.4 | MUST | Make the Report-ID unique among reports to the same domain, and keep it when sending the report again. | n/a: the caller chooses the Report-ID. |
+| DMARC-AGG-25 | RFC 9990 3.1.3 | SHOULD | Report no more than 100 DKIM signatures for a row, in order of preference: passing in strict alignment, in relaxed alignment, other passing, not passing. | `TestBuildReportDKIMOrderAndLimit` |
+| DMARC-AGG-26 | RFC 9990 3.1.1.11 | MUST | Include the result of every DKIM signature validation attempted (within DMARC-AGG-25's limit). | `TestAuthResults_ReportsAuthenticatingDomains` |
 
-## The report schema (RFC 7489 Appendix C)
-
-| ID | Section | Level | Requirement | Tests |
-|----|---------|-------|-------------|-------|
-| DMARC-XML-01 | RFC 7489 C | MUST | The report's version is 1.0. | `TestBuildReport_ValidXML` |
-| DMARC-XML-02 | RFC 7489 C | Normative | The report validates against the Appendix C schema: its elements, their order, how often each occurs, and their types. | `TestReportValidatesAgainstAppendixC`, `TestBuildReport_GoldenXML`, `FuzzBuildReport` |
-| DMARC-XML-03 | RFC 7489 C | Normative | policy_published has domain, p, sp, pct and fo, and adkim and aspf as r or s when present. | `TestBuildReportPolicyPublished`, `TestBuildReport_GoldenXML` |
-| DMARC-XML-04 | RFC 7489 C | Normative | Each record's auth_results has at least one spf result. | `TestBuildReportAlwaysHasSPF` |
-| DMARC-XML-05 | RFC 7489 C | Normative | auth_results has a dkim result per signature, and none for an unsigned message. | `TestBuildReport_OmitsDKIMWhenUnsigned`, `TestAuthResults_OmitsDKIMWhenUnsigned` |
-| DMARC-XML-06 | RFC 7489 C | Normative | Dispositions, DMARC results, DKIM and SPF results and SPF scopes take only their enumerated values. | `TestBuildReport_SchemaConformance`, `TestReportValidatesAgainstAppendixC`, `FuzzBuildReport` |
-| DMARC-XML-07 | RFC 7489 C | Normative | source_ip matches the IPAddress pattern: a dotted quad, or an IPv6 address in eight groups. | `TestBuildReportSourceIP` |
-| DMARC-XML-08 | RFC 7489 C | Normative | A report has at least one record. | `TestBuildReportNeedsRecords` |
-| DMARC-XML-09 | RFC 7489 C | Normative | A policy override reason's type is a PolicyOverrideType. | `TestBuildReportOverrideReasons` |
-| DMARC-XML-10 | RFC 7489 C | Normative | identifiers has envelope_from and header_from. | `TestBuildReport_SchemaConformance` |
-
-## Failure reports (RFC 7489 §7.3)
+## The report schema (RFC 9990 §3.1.1, Appendix A)
 
 | ID | Section | Level | Requirement | Tests |
 |----|---------|-------|-------------|-------|
-| DMARC-FAIL-01 | RFC 7489 7.3 | SHOULD | Include the URIs of the message that failed. | n/a: failure reports are not supported yet; the library builds aggregate reports only. |
-| DMARC-FAIL-02 | RFC 7489 7.3 | SHOULD | Include as much of the message and its header as reasonable. | n/a: failure reports are not supported yet. |
-| DMARC-FAIL-03 | RFC 7489 7.3 | MUST | Attempt delivery to each selected ruf= URI. | n/a: failure reports are not supported yet. |
-| DMARC-FAIL-04 | RFC 7489 7.3.1 | REQUIRED | Include the Identity-Alignment field. | n/a: failure reports are not supported yet. |
-| DMARC-FAIL-05 | RFC 7489 7.3.1 | REQUIRED | Include DKIM-Domain, DKIM-Identity and DKIM-Selector when the message was signed. | n/a: failure reports are not supported yet. |
-| DMARC-FAIL-06 | RFC 7489 7.3.1 | REQUIRED | Include SPF-DNS. | n/a: failure reports are not supported yet. |
+| DMARC-XML-01 | RFC 9990 3.1.1.2 | MUST | The report's version is 1.0. | `TestBuildReport_ValidXML` |
+| DMARC-XML-02 | RFC 9990 A | Normative | The report validates against the Appendix A schema: its elements, their order, how often each occurs, and their types. | `TestReportValidatesAgainstAppendixA`, `TestBuildReport_GoldenXML`, `FuzzBuildReport` |
+| DMARC-XML-03 | RFC 9990 3.1.1.5 | Normative | policy_published has domain and p, and sp, np, fo, adkim, aspf and testing with the discovered or default value, and the discovery method. | `TestBuildReportPolicyPublished`, `TestBuildReport_GoldenXML` |
+| DMARC-XML-04 | RFC 9990 3.1.1.11, 3.1.1.13 | Normative | auth_results has at most one spf result, the MAIL FROM identity's, with scope mfrom, and none when SPF was not checked. | `TestBuildReportSPF` |
+| DMARC-XML-05 | RFC 9990 3.1.1.11 | Normative | auth_results has a dkim result per signature, and none for an unsigned message. | `TestBuildReport_OmitsDKIMWhenUnsigned`, `TestAuthResults_OmitsDKIMWhenUnsigned` |
+| DMARC-XML-06 | RFC 9990 A | Normative | Dispositions, DMARC results, DKIM and SPF results, override types, discovery methods and testing take only their enumerated values. | `TestBuildReport_SchemaConformance`, `TestReportValidatesAgainstAppendixA`, `FuzzBuildReport` |
+| DMARC-XML-07 | RFC 9990 3.1.1.8 | Normative | source_ip is an IPv4address or IPv6address of RFC 3986 §3.2.2. | `TestBuildReportSourceIP` |
+| DMARC-XML-08 | RFC 9990 3.1.1.2, 3.1.1.7 | MUST | A report has at least one record. | `TestBuildReportNeedsRecords` |
+| DMARC-XML-09 | RFC 9990 3.1.6 | MUST | A policy override reason's type is one of the pre-defined values. | `TestBuildReportOverrideReasons` |
+| DMARC-XML-10 | RFC 9990 3.1.1.10 | Normative | identifiers has header_from, and envelope_from and envelope_to when they are known. | `TestBuildReport_SchemaConformance`, `TestBuildReportSPF` |
+| DMARC-XML-11 | RFC 9990 3.1.1.1 | Normative | The root element feedback, and every element in it, is in the DMARC namespace. | `TestBuildReport_GoldenXML`, `TestReportValidatesAgainstAppendixA` |
+| DMARC-XML-12 | RFC 9990 3.1.1.2, 3.1.1.7, 3.1.1.9, 3.1.1.11 | MUST | The elements of feedback, record, policy_evaluated and auth_results appear in the order listed. | `TestBuildReport_GoldenXML`, `TestReportValidatesAgainstAppendixA` |
+| DMARC-XML-13 | RFC 9990 3.1.1.9 | MUST | policy_evaluated's dkim and spf are the values as they relate to DMARC, not those used when overriding the policy. | `TestEvaluated_RequiresPassAndAlign`, `TestPolicyEvaluatedAnySignature` |
+| DMARC-XML-14 | RFC 9990 3.1.1.12 | Normative | Each dkim result has the signature's domain, selector and result. | `TestAuthResults_ReportsAuthenticatingDomains`, `TestReportValidatesAgainstAppendixA` |
+| DMARC-XML-15 | RFC 9990 3.2, 5 | SHOULD NOT | Make the presence or absence of extensions an error. | n/a: the library writes no extensions and reads no reports. |
+
+## Failure reports (RFC 9991)
+
+| ID | Section | Level | Requirement | Tests |
+|----|---------|-------|-------------|-------|
+| DMARC-FAIL-01 | 5.3.9; RFC 9991 | MAY | Send per-message failure reports. | n/a: failure reports are not supported yet; the library builds aggregate reports only. |
 
 ## Internationalized mail (RFC 8616 §6)
 
@@ -221,5 +238,5 @@ before lookup. RFC 8616 §§4–5 update SPF and DKIM and are not DMARC's.
 | ID | Section | Level | Requirement | Tests |
 |----|---------|-------|-------------|-------|
 | DMARC-EAI-01 | RFC 8616 §6; 5.3.1 | Normative | Convert every U-label in the RFC5322.From domain to an A-label before further processing: policy lookup, the Organizational Domain and alignment. | `TestRFC8616ULabels` |
-| DMARC-EAI-02 | RFC 8616 §6; RFC 7489 7.1 | Normative | Convert every U-label in the domains §7.1 handles to an A-label, including the policy domain in `<policy domain>._report._dmarc.<host>`. | `TestRFC8616ULabels` |
+| DMARC-EAI-02 | RFC 8616 §6; RFC 9990 4 | Normative | Convert every U-label in the domains the external-destination check handles to an A-label, including the policy domain in `<policy domain>._report._dmarc.<host>`. | `TestRFC8616ULabels` |
 | DMARC-EAI-03 | RFC 8616 §6; 4.6 | Normative | rua= and ruf= addresses are conventional, never internationalized, because one record serves both kinds of mail: a mailto: URI naming a UTF-8 local part or a U-label domain, raw or percent-encoded, is not a valid report URI. | `TestRFC8616ConventionalReportAddresses`, `TestDifferentialRecords` |

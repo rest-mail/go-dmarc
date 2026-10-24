@@ -11,7 +11,7 @@ import (
 // uris is its arguments, as a list of report URIs.
 func uris(ss ...string) []string { return ss }
 
-// TestAuthorizeReportURIs checks the RFC 7489 §7.1 verification of external
+// TestAuthorizeReportURIs checks the RFC 9990 §4 verification of external
 // report destinations: URIs inside the policy's Organizational Domain (found
 // by a DNS Tree Walk, RFC 9989 §4.10.2) pass unchecked; others need a
 // v=DMARC1 record at
@@ -19,7 +19,7 @@ func uris(ss ...string) []string { return ss }
 // replace the URI, but only with URIs on the same host; and a DNS failure is
 // returned.
 //
-// checklist: DMARC-EXT-01 DMARC-EXT-02 DMARC-EXT-03 DMARC-EXT-04 DMARC-EXT-05 DMARC-EXT-06
+// checklist: DMARC-EXT-01 DMARC-EXT-02 DMARC-EXT-03 DMARC-EXT-04 DMARC-EXT-05 DMARC-EXT-06 DMARC-EXT-08
 func TestAuthorizeReportURIs(t *testing.T) {
 	zone := map[string][]string{
 		// example.test is its subdomains' Organizational Domain.
@@ -78,6 +78,8 @@ func TestAuthorizeReportURIs(t *testing.T) {
 			uris("mailto:dmarc@example.test", "mailto:b@any.test"), 2},
 		{"encoded address and headers", "rua", uris("mailto:dmarc%40x@reports.test?subject=hi"), uris("mailto:dmarc%40x@reports.test?subject=hi"), 1},
 		{"no host", "rua", uris("mailto:nobody", "mailto:%zz@reports.test", "urn:isbn:1", "mailto:a@b..test", "%"), nil, 0},
+		// RFC 9990 §4 step 4: a name too long for the DNS cannot confirm anything.
+		{"name too long", "rua", uris("mailto:a@" + strings.Repeat("x", 60) + "." + strings.Repeat("y", 60) + "." + strings.Repeat("z", 60) + "." + strings.Repeat("w", 50) + ".test"), nil, 0},
 	}
 	for _, c := range cases {
 		queries = nil

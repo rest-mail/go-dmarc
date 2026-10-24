@@ -95,8 +95,9 @@ func ExampleOrgDomain() {
 	// mail.mega.bank.example -> mega.bank.example
 }
 
-// Example_aggregateReport turns per-message evaluations into the RFC 7489
-// aggregate-report XML and gzips it for delivery.
+// Example_aggregateReport turns per-message evaluations into the RFC 9990
+// aggregate-report XML, gzips it for delivery, and names the attachment and
+// the message.
 func Example_aggregateReport() {
 	records := []dmarc.AggregateRecord{
 		{
@@ -106,9 +107,7 @@ func Example_aggregateReport() {
 			Disposition: "reject",
 			// SPF passed for the envelope-sender (bounce) domain, which does not
 			// align with the From domain; auth_results reports that checked domain.
-			SPF: []dmarc.SPFAuth{
-				{Domain: "bounce.marketing.net", Scope: "mfrom", Result: "pass", Aligned: false},
-			},
+			SPF: &dmarc.SPFAuth{Domain: "bounce.marketing.net", Result: "pass", Aligned: false},
 		},
 	}
 	meta := dmarc.ReportMetadata{
@@ -117,7 +116,7 @@ func Example_aggregateReport() {
 		ReportID:  "1@reporter.example",
 		DateRange: dmarc.DateRange{Begin: 1784700000, End: 1784786400},
 	}
-	policy := dmarc.PolicyPublished{Domain: "example.com", ADKIM: "r", ASPF: "r", P: "reject", PCT: 100}
+	policy := dmarc.PolicyPublished{Domain: "example.com", ADKIM: "r", ASPF: "r", P: "reject"}
 
 	xmlBytes, err := dmarc.BuildReport(meta, policy, records)
 	if err != nil {
@@ -127,11 +126,18 @@ func Example_aggregateReport() {
 	if err != nil {
 		panic(err)
 	}
+	name, _ := dmarc.ReportFilename("reporter.example", "example.com", meta.DateRange, "", true)
+	subject, _ := dmarc.ReportSubject("example.com", "reporter.example", meta.ReportID)
 	fmt.Printf("xml=%v rows=%d gzipped=%v\n",
 		bytes.HasPrefix(xmlBytes, []byte("<?xml")),
 		bytes.Count(xmlBytes, []byte("<record>")),
 		len(gz) > 0)
-	// Output: xml=true rows=1 gzipped=true
+	fmt.Println(name)
+	fmt.Println(subject)
+	// Output:
+	// xml=true rows=1 gzipped=true
+	// reporter.example!example.com!1784700000!1784786400.xml.gz
+	// Report Domain: example.com Submitter: reporter.example Report-ID: 1@reporter.example
 }
 
 // ExampleParseRecord reads every tag of a record, here RFC 9989 Appendix

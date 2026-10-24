@@ -6,14 +6,15 @@ import (
 )
 
 // AuthorizeReportURIs returns the report URIs a reporter may send to, after
-// the RFC 7489 §7.1 check of external destinations. policyDomain is the
+// the RFC 9990 §4 check of external destinations. policyDomain is the
 // domain whose record listed the URIs ([Policy.Domain]), tag is "rua" or
 // "ruf", and uris are that record's [Record.RUA] or [Record.RUF].
 //
 // A URI whose host has the same Organizational Domain as policyDomain is kept
 // as it is. For any other URI the destination host must confirm it wants the
 // reports by publishing a record starting with v=DMARC1 at
-// <policyDomain>._report._dmarc.<host>; a URI without one is dropped. When the
+// <policyDomain>._report._dmarc.<host>; a URI without one is dropped, and so
+// is one for which that name is too long for the DNS (§4 step 4). When the
 // confirming record carries the same tag, its URIs replace the original, but
 // only if they all use the same host: otherwise neither the original nor the
 // override is used. URIs whose host cannot be found (a mailto: without an
@@ -21,7 +22,7 @@ import (
 //
 // The Organizational Domains come from DNS Tree Walks ([OrgDomain], RFC 9989
 // §4.10.2). A resolver error other than not-found is returned with the URIs
-// checked so far, so the caller can try again later (§7.1 step 4). A nil
+// checked so far, so the caller can try again later (§4 step 5). A nil
 // resolver uses net.LookupTXT.
 func AuthorizeReportURIs(policyDomain, tag string, uris []string, resolver TXTResolver) ([]string, error) {
 	policyDomain, ok := queryDomain(policyDomain)
@@ -46,19 +47,23 @@ func AuthorizeReportURIs(policyDomain, tag string, uris []string, resolver TXTRe
 			out = append(out, u)
 			continue
 		}
-		records, err := lookupVersioned(policyDomain+"._report._dmarc."+host, resolver)
+		name, ok := queryDomain(policyDomain + "._report._dmarc." + host)
+		if !ok {
+			continue // §4 step 4: the name exceeds DNS limits, so nothing can confirm it
+		}
+		records, err := lookupVersioned(name, resolver)
 		if err != nil {
 			return out, err
 		}
 		if len(records) == 0 {
-			continue // §7.1 step 6: not confirmed, so the URI is ignored
+			continue // §4 step 7: not confirmed, so the URI is ignored
 		}
 		override := overrideURIs(records, tag)
 		if override == nil {
 			out = append(out, u)
 			continue
 		}
-		// §7.1 step 8: an override must keep the destination host, or neither
+		// §4: an override must keep the destination host, or neither
 		// the original nor the override is used.
 		sameHost := true
 		for _, o := range override {
@@ -90,7 +95,7 @@ func overrideURIs(records []string, tag string) []string {
 
 // reportURIHost returns the destination host of a report URI in A-label form:
 // the domain of a mailto: URI's address, or the host of any other URI's
-// authority (§7.1 step 1).
+// authority (§4 step 1).
 func reportURIHost(uri string) (string, bool) {
 	u, err := url.Parse(uri)
 	if err != nil {

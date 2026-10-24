@@ -2,19 +2,18 @@
 
 [![CI](https://github.com/rest-mail/go-dmarc/actions/workflows/ci.yml/badge.svg)](https://github.com/rest-mail/go-dmarc/actions/workflows/ci.yml)
 [![Coverage gate: >=95%](https://img.shields.io/badge/coverage%20gate-%3E%3D95%25-brightgreen)](COVERAGE.md)
-[![Checklist: 73/106 mapped](https://img.shields.io/badge/checklist-73%2F106%20mapped-blue)](CHECKLIST.md)
+[![Checklist: 82/106 mapped](https://img.shields.io/badge/checklist-82%2F106%20mapped-blue)](CHECKLIST.md)
 [![Go Reference](https://pkg.go.dev/badge/github.com/rest-mail/go-dmarc.svg)](https://pkg.go.dev/github.com/rest-mail/go-dmarc)
 [![Go Report Card](https://goreportcard.com/badge/github.com/rest-mail/go-dmarc)](https://goreportcard.com/report/github.com/rest-mail/go-dmarc)
 
 The receiver side of DMARC ([RFC 9989](https://www.rfc-editor.org/rfc/rfc9989))
 for Go, from the [REST Mail](https://rest-mail.com) project: policy lookup and
 parsing with the DNS Tree Walk, identifier alignment, and aggregate (rua)
-report generation. Standard library only, no external dependencies.
+report generation ([RFC 9990](https://www.rfc-editor.org/rfc/rfc9990)).
+Standard library only, no external dependencies.
 
-It is checked item by item against the RFC in [CHECKLIST.md](CHECKLIST.md).
-RFC 9989 (May 2026) obsoletes RFC 7489, and the receiver side follows it.
-Aggregate reports still use RFC 7489's format until they move to
-[RFC 9990](https://www.rfc-editor.org/rfc/rfc9990); the checklist says what
+It is checked item by item against the RFCs in [CHECKLIST.md](CHECKLIST.md).
+RFC 9989 and RFC 9990 (May 2026) obsolete RFC 7489; the checklist says what
 changed.
 
 ## About
@@ -52,9 +51,11 @@ likes; a reporter later hands a slice of neutral `AggregateRecord` values to
   (§4.10.2), from DNS rather than a Public Suffix List.
 - **Aggregate reporting** — `AggregateRecords` groups per-message evaluations
   into report rows, `BuildReport` marshals an aggregate report that validates
-  against RFC 7489's Appendix C schema (with policy-override reasons),
-  `NewPolicyPublished` describes the discovered policy, and `Gzip` compresses
-  the report for the `application/gzip` attachment.
+  against RFC 9990's Appendix A schema, in its namespace (with policy-override
+  reasons), `NewPolicyPublished` describes the discovered policy, `Gzip`
+  compresses the report for the `application/gzip` attachment, and
+  `ReportFilename` and `ReportSubject` name the attachment and the message
+  (§3.5.2).
 - **External report destinations** — `AuthorizeReportURIs` performs the check
   that a `rua=`/`ruf=` address outside the domain's Organizational Domain
   agreed to receive its reports, including the destination's override.
@@ -129,6 +130,7 @@ meta := dmarc.ReportMetadata{
 	Email:     "dmarc@reporter.example",
 	ReportID:  "1784700000.example.com@reporter.example",
 	DateRange: dmarc.DateRange{Begin: begin, End: end},
+	Generator: "my-mta 1.0",
 }
 policy := dmarc.NewPolicyPublished(discovered) // from dmarc.Discover
 
@@ -140,7 +142,9 @@ gz, err := dmarc.Gzip(xmlBytes)
 if err != nil {
 	panic(err)
 }
-_ = gz // attach as application/gzip
+// Attach gz as application/gzip under this name, in a message with this Subject.
+name, _ := dmarc.ReportFilename("reporter.example", policy.Domain, meta.DateRange, "", true)
+subject, _ := dmarc.ReportSubject(policy.Domain, "reporter.example", meta.ReportID)
 ```
 
 `BuildReport` calls `AggregateRecords` for you (identical rows are summed into a
@@ -175,14 +179,11 @@ simplest secure option:
   U-labels to A-labels. Anything else has no policy (no DNS query is sent) and
   never aligns.
 - **In a report**, an unknown result or disposition becomes `none`, an
-  unknown override reason `other` (keeping its text in the comment), a record
-  with no SPF result gets one of `none` for its envelope domain, and IPv6
-  source addresses are written in full, as the schema's pattern requires. A
-  report with no records, or a source address that is not an IP address, is
-  refused.
-- **The report's root element** has no XML namespace. The schema names one,
-  but no generator in use sets it, and RFC 9990's new schema has a different
-  one.
+  unknown override reason `other` (keeping its text in the comment, as RFC
+  7489's `forwarded` and `sampled_out` do), each value of policy_published
+  the caller leaves empty takes its default, and a record SPF did not check
+  has no `spf` result. A report with no records, or a source address that is
+  not an IP address, is refused.
 
 ## Testing
 
@@ -210,7 +211,7 @@ are in the targets, and inputs that once failed are kept there or in
 
 The coverage badge shows the enforced minimum; measured statement coverage
 is printed in each CI run's **Verify RFC** log. The checklist badge counts
-requirements mapped to tests over all checklist rows, including the 33
+requirements mapped to tests over all checklist rows, including the 24
 `n/a` rows with documented reasons. CI checks the badge against the actual
 checklist and its test mappings. The CI badge reports whether verification
 passed.
@@ -219,8 +220,8 @@ RFC 9989's own examples are tests: the records of Appendix B.2 (including
 B.2.5's two report URIs and test mode), the alignment examples of B.1 and
 §4.4, the three Tree Walks of B.4 (with the queries each sends), and the
 third-party destination and override of B.2.3 and B.2.4. Every report shape is
-validated against RFC 7489's Appendix C schema, which `schema_test.go`
-encodes. Differential tests check the record parser against
+validated against RFC 9990's Appendix A schema, namespace included, which
+`schema_test.go` encodes. Differential tests check the record parser against
 [go-msgauth](https://github.com/emersion/go-msgauth) (MIT, RFC 7489), listing
 each place where the two disagree on purpose and why. go-msgauth and
 golang.org/x/net are test-only dependencies; the library does not import
@@ -283,7 +284,7 @@ Full API reference:
 
 Recent releases — see [CHANGELOG.md](CHANGELOG.md) for the complete history.
 
-- **Unreleased** — breaking: the receiver side follows RFC 9989: the DNS Tree Walk finds the Organizational Domain (`OrgDomain`) and the policy (`Discover`, with the PSD's record and `np=`), `AlignedMode` and `AuthorizeReportURIs` take a resolver, `t=` test mode gives `Policy.Applied`, and `pct=`, `rf=`, `ri=` and URI size limits are ignored.
+- **Unreleased** — breaking: DMARCbis. The receiver side follows RFC 9989: the DNS Tree Walk finds the Organizational Domain (`OrgDomain`) and the policy (`Discover`, with the PSD's record and `np=`), `AlignedMode` and `AuthorizeReportURIs` take a resolver, `t=` test mode gives `Policy.Applied`, and `pct=`, `rf=`, `ri=` and URI size limits are ignored. Aggregate reports follow RFC 9990 (namespace, `np`, `testing`, `discovery_method`, one MAIL FROM `spf`, `ReportFilename`, `ReportSubject`).
 - **v0.4.1** (2026-10-22) — breaking: `ParseRecord` and `Record` replace `ParsePct`/`ParseADKIM`/`ParseASPF`, and `Policy` carries the parsed `Record`; invalid optional tags take their defaults and an invalid policy follows §6.6.3 step 6 instead of erroring; `v=DMARC1` is case-sensitive; reports validate against Appendix C (`sp`, `pct`, `fo`, an `spf` result and full IPv6 always written) with override reasons; adds `AuthorizeReportURIs` (§7.1); fixes a quadratic punycode slowdown on long domains; an RFC checklist, a 95% coverage gate, fuzzing and differential tests.
 - **v0.3.0** (2026-07-25) — breaking: `ParsePolicy`/`ParsePct` now return errors (invalid `p=`/`pct=` rejected); adds strict-alignment mode (`AlignmentMode`, ADKIM/ASPF) + RFC 7489 App C `rua` XML fixes.
 - **v0.2.0** (2026-07-25) — breaking: `AggregateRecord` carries per-identifier `DKIM`/`SPF` auth slices; adds `Discover` with organizational-domain fallback and PSL-backed `AlignedOrg`.

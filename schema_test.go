@@ -5,19 +5,23 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"net/netip"
 	"regexp"
 	"slices"
 	"strings"
 )
 
-// The aggregate report schema of RFC 7489 Appendix C, written out as Go data
+// The aggregate report schema of RFC 9990 Appendix A, written out as Go data
 // so that validateReport can check a document against it without an XML
 // schema library. Each complex type lists its child elements in the schema's
 // order with their type and occurrences (maxOccurs -1 is "unbounded"); all
 // marks an xs:all group, whose children may come in any order. Each simple
-// type is an enumeration or a pattern, as in the schema. Namespaces are not
-// checked: the schema names a target namespace but no report generator puts
-// its elements in it, and neither does BuildReport.
+// type is an enumeration or a pattern, as in the schema. The schema's
+// elementFormDefault is qualified, so every element must be in its target
+// namespace, urn:ietf:params:xml:ns:dmarc-2.0. The langAttrString elements
+// are strings with an optional lang attribute, which BuildReport never
+// writes, and source_ip, an xs:string in the schema, must be the IPv4address
+// or IPv6address of RFC 3986 §3.2.2 that §3.1.1.8 says it is.
 
 type schemaElement struct {
 	name     string
@@ -33,97 +37,105 @@ type schemaComplexType struct {
 func one(name, typ string) schemaElement      { return schemaElement{name, typ, 1, 1} }
 func optional(name, typ string) schemaElement { return schemaElement{name, typ, 0, 1} }
 
-var appendixCComplexTypes = map[string]schemaComplexType{
+var appendixAComplexTypes = map[string]schemaComplexType{
 	"feedback": {elements: []schemaElement{
-		one("version", "xs:decimal"),
+		optional("version", "xs:decimal"),
 		one("report_metadata", "ReportMetadataType"),
 		one("policy_published", "PolicyPublishedType"),
+		optional("extension", "ExtensionType"),
 		{"record", "RecordType", 1, -1},
 	}},
 	"DateRangeType": {all: true, elements: []schemaElement{one("begin", "xs:integer"), one("end", "xs:integer")}},
-	"ReportMetadataType": {elements: []schemaElement{
+	"ReportMetadataType": {all: true, elements: []schemaElement{
 		one("org_name", "xs:string"),
 		one("email", "xs:string"),
 		optional("extra_contact_info", "xs:string"),
 		one("report_id", "xs:string"),
 		one("date_range", "DateRangeType"),
-		{"error", "xs:string", 0, -1},
+		optional("error", "xs:string"),
+		optional("generator", "xs:string"),
 	}},
 	"PolicyPublishedType": {all: true, elements: []schemaElement{
 		one("domain", "xs:string"),
+		one("p", "DispositionType"),
+		optional("sp", "DispositionType"),
+		optional("np", "DispositionType"),
 		optional("adkim", "AlignmentType"),
 		optional("aspf", "AlignmentType"),
-		one("p", "DispositionType"),
-		one("sp", "DispositionType"),
-		one("pct", "xs:integer"),
-		one("fo", "xs:string"),
+		optional("discovery_method", "DiscoveryType"),
+		optional("fo", "xs:string"),
+		optional("testing", "TestingType"),
 	}},
 	"PolicyOverrideReason": {all: true, elements: []schemaElement{
 		one("type", "PolicyOverrideType"),
 		optional("comment", "xs:string"),
 	}},
 	"PolicyEvaluatedType": {elements: []schemaElement{
-		one("disposition", "DispositionType"),
+		one("disposition", "ActionDispositionType"),
 		one("dkim", "DMARCResultType"),
 		one("spf", "DMARCResultType"),
 		{"reason", "PolicyOverrideReason", 0, -1},
 	}},
 	"RowType": {all: true, elements: []schemaElement{
-		one("source_ip", "IPAddress"),
+		one("source_ip", "RFC3986IP"),
 		one("count", "xs:integer"),
 		one("policy_evaluated", "PolicyEvaluatedType"),
 	}},
 	"IdentifierType": {all: true, elements: []schemaElement{
-		optional("envelope_to", "xs:string"),
-		one("envelope_from", "xs:string"),
 		one("header_from", "xs:string"),
+		optional("envelope_from", "xs:string"),
+		optional("envelope_to", "xs:string"),
 	}},
 	"DKIMAuthResultType": {all: true, elements: []schemaElement{
 		one("domain", "xs:string"),
-		optional("selector", "xs:string"),
+		one("selector", "xs:string"),
 		one("result", "DKIMResultType"),
 		optional("human_result", "xs:string"),
 	}},
 	"SPFAuthResultType": {all: true, elements: []schemaElement{
 		one("domain", "xs:string"),
-		one("scope", "SPFDomainScope"),
+		optional("scope", "SPFDomainScope"),
 		one("result", "SPFResultType"),
+		optional("human_result", "xs:string"),
 	}},
 	"AuthResultType": {elements: []schemaElement{
 		{"dkim", "DKIMAuthResultType", 0, -1},
-		{"spf", "SPFAuthResultType", 1, -1},
+		optional("spf", "SPFAuthResultType"),
 	}},
 	"RecordType": {elements: []schemaElement{
 		one("row", "RowType"),
 		one("identifiers", "IdentifierType"),
 		one("auth_results", "AuthResultType"),
 	}},
+	"ExtensionType": {elements: nil},
 }
 
-var appendixCEnumerations = map[string][]string{
-	"AlignmentType":      {"r", "s"},
-	"DispositionType":    {"none", "quarantine", "reject"},
-	"DMARCResultType":    {"pass", "fail"},
-	"PolicyOverrideType": {"forwarded", "sampled_out", "trusted_forwarder", "mailing_list", "local_policy", "other"},
-	"DKIMResultType":     {"none", "pass", "fail", "policy", "neutral", "temperror", "permerror"},
-	"SPFDomainScope":     {"helo", "mfrom"},
-	"SPFResultType":      {"none", "neutral", "pass", "fail", "softfail", "temperror", "permerror"},
+var appendixAEnumerations = map[string][]string{
+	"AlignmentType":         {"r", "s"},
+	"DispositionType":       {"none", "quarantine", "reject"},
+	"ActionDispositionType": {"none", "pass", "quarantine", "reject"},
+	"DiscoveryType":         {"psl", "treewalk"},
+	"TestingType":           {"n", "y"},
+	"DMARCResultType":       {"pass", "fail"},
+	"PolicyOverrideType":    {"local_policy", "mailing_list", "other", "policy_test_mode", "trusted_forwarder"},
+	"DKIMResultType":        {"none", "pass", "fail", "policy", "neutral", "temperror", "permerror"},
+	"SPFDomainScope":        {"mfrom"},
+	"SPFResultType":         {"none", "pass", "fail", "softfail", "policy", "neutral", "temperror", "permerror"},
 }
 
-// appendixCPatterns are the schema's patterns, anchored as XML Schema
-// patterns are; the built-in xs:integer and xs:decimal lexical forms are here
-// too. IPAddress is the schema's own pattern, character for character.
-var appendixCPatterns = map[string]*regexp.Regexp{
-	"IPAddress":  regexp.MustCompile(`^(?:((1?[0-9]?[0-9]|2[0-4][0-9]|25[0-5]).){3}(1?[0-9]?[0-9]|2[0-4][0-9]|25[0-5])|([A-Fa-f0-9]{1,4}:){7}[A-Fa-f0-9]{1,4})$`),
+// appendixAPatterns are the built-in xs:integer and xs:decimal lexical forms,
+// anchored as XML Schema patterns are.
+var appendixAPatterns = map[string]*regexp.Regexp{
 	"xs:integer": regexp.MustCompile(`^[+-]?[0-9]+$`),
 	"xs:decimal": regexp.MustCompile(`^[+-]?([0-9]+(\.[0-9]*)?|\.[0-9]+)$`),
 }
 
-// xmlNode is a parsed element: its name, its child elements, and its text.
+// xmlNode is a parsed element: its name and namespace, its child elements,
+// and its text.
 type xmlNode struct {
-	name     string
-	children []*xmlNode
-	text     strings.Builder
+	name, space string
+	children    []*xmlNode
+	text        strings.Builder
 }
 
 // parseXMLTree reads a document into a tree of elements.
@@ -141,7 +153,7 @@ func parseXMLTree(doc []byte) (*xmlNode, error) {
 		}
 		switch tok := tok.(type) {
 		case xml.StartElement:
-			n := &xmlNode{name: tok.Name.Local}
+			n := &xmlNode{name: tok.Name.Local, space: tok.Name.Space}
 			if len(stack) == 0 {
 				if root != nil {
 					return nil, fmt.Errorf("second root element <%s>", n.name)
@@ -166,7 +178,7 @@ func parseXMLTree(doc []byte) (*xmlNode, error) {
 	return root, nil
 }
 
-// validateReport checks an aggregate report document against the Appendix C
+// validateReport checks an aggregate report document against the Appendix A
 // schema and returns the first violation it finds.
 func validateReport(doc []byte) error {
 	root, err := parseXMLTree(doc)
@@ -180,7 +192,10 @@ func validateReport(doc []byte) error {
 }
 
 func validateNode(n *xmlNode, typ, path string) error {
-	ct, complex := appendixCComplexTypes[typ]
+	if n.space != Namespace {
+		return fmt.Errorf("%s: <%s> is in namespace %q, want %q", path, n.name, n.space, Namespace)
+	}
+	ct, complex := appendixAComplexTypes[typ]
 	if !complex {
 		if len(n.children) > 0 {
 			return fmt.Errorf("%s: simple type %s has child elements", path, typ)
@@ -233,13 +248,19 @@ func validateSimple(text, typ, path string) error {
 	if typ == "xs:string" {
 		return nil
 	}
-	if enum, ok := appendixCEnumerations[typ]; ok {
+	if typ == "RFC3986IP" {
+		if ip, err := netip.ParseAddr(text); err != nil || ip.Zone() != "" || ip.Is4In6() {
+			return fmt.Errorf("%s: %q is not an RFC 3986 IPv4address or IPv6address", path, text)
+		}
+		return nil
+	}
+	if enum, ok := appendixAEnumerations[typ]; ok {
 		if !slices.Contains(enum, text) {
 			return fmt.Errorf("%s: %q is not a %s %q", path, text, typ, enum)
 		}
 		return nil
 	}
-	re, ok := appendixCPatterns[typ]
+	re, ok := appendixAPatterns[typ]
 	if !ok {
 		return fmt.Errorf("%s: unknown type %s", path, typ)
 	}
