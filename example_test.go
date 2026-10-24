@@ -3,7 +3,6 @@ package dmarc_test
 import (
 	"bytes"
 	"fmt"
-	"math"
 
 	"github.com/rest-mail/go-dmarc"
 )
@@ -14,8 +13,8 @@ import (
 // when none does, the receiver applies the domain's published policy.
 func Example() {
 	// The record published at _dmarc.example.com. In production, discover the
-	// policy with dmarc.Discover("example.com", nil, nil) (which also handles the
-	// organizational-domain fallback for subdomains); a literal keeps this DNS-free.
+	// policy with dmarc.Discover("example.com", nil, nil) (which also walks the
+	// DNS tree for subdomains); a literal keeps this DNS-free.
 	record := "v=DMARC1; p=reject; adkim=r; aspf=r; rua=mailto:agg@example.com"
 	policy, err := dmarc.ParsePolicy(record) // requested policy for failures
 	if err != nil {
@@ -27,7 +26,19 @@ func Example() {
 	fromDomain := "example.com"
 	spfDomain, spfPass := "bounce.marketing.net", true
 
-	dmarcPass := spfPass && dmarc.Aligned(spfDomain, fromDomain)
+	// Relaxed alignment compares Organizational Domains, which a DNS Tree Walk
+	// finds; production callers pass nil for system DNS.
+	resolver := func(name string) ([]string, error) {
+		if name == "_dmarc.example.com" || name == "_dmarc.marketing.net" {
+			return []string{"v=DMARC1; p=none"}, nil
+		}
+		return nil, nil
+	}
+	aligned, err := dmarc.AlignedMode(spfDomain, fromDomain, dmarc.AlignmentRelaxed, resolver)
+	if err != nil {
+		panic(err) // a DNS failure: the policy cannot be applied (RFC 9989 §5.3.6)
+	}
+	dmarcPass := spfPass && aligned
 
 	disposition := "none"
 	if !dmarcPass {
@@ -37,8 +48,8 @@ func Example() {
 	// Output: dmarc=false disposition=reject
 }
 
-// ExampleDiscover shows the RFC 7489 §6.6.3 organizational-domain fallback: a
-// subdomain that publishes no _dmarc record of its own inherits the org domain's
+// ExampleDiscover shows the RFC 9989 §4.10 DNS Tree Walk: a subdomain that
+// publishes no _dmarc record of its own inherits its Organizational Domain's
 // subdomain policy (sp=, else p=). The resolver is injected to keep this
 // DNS-free; production callers pass nil to use system DNS.
 func ExampleDiscover() {
@@ -54,9 +65,34 @@ func ExampleDiscover() {
 	if err != nil {
 		panic(err)
 	}
-	fmt.Printf("via_org=%v from=%s apply=%s\n",
-		policy.ViaOrgDomain, policy.Domain, policy.Requested)
-	// Output: via_org=true from=example.com apply=quarantine
+	fmt.Printf("inherited=%v from=%s apply=%s\n",
+		policy.Inherited, policy.Domain, policy.Applied)
+	// Output: inherited=true from=example.com apply=quarantine
+}
+
+// ExampleOrgDomain finds Organizational Domains under a Public Suffix Domain
+// that says it is one (psd=y), as in RFC 9989 Appendix B.4.3.
+func ExampleOrgDomain() {
+	resolver := func(name string) ([]string, error) {
+		switch name {
+		case "_dmarc.giant.bank.example":
+			return []string{"v=DMARC1; p=reject"}, nil
+		case "_dmarc.bank.example":
+			return []string{"v=DMARC1; p=none; psd=y"}, nil
+		}
+		return nil, nil
+	}
+	for _, domain := range []string{"giant.bank.example", "mail.giant.bank.example", "mail.mega.bank.example"} {
+		org, err := dmarc.OrgDomain(domain, resolver)
+		if err != nil {
+			panic(err)
+		}
+		fmt.Println(domain, "->", org)
+	}
+	// Output:
+	// giant.bank.example -> giant.bank.example
+	// mail.giant.bank.example -> giant.bank.example
+	// mail.mega.bank.example -> mega.bank.example
 }
 
 // Example_aggregateReport turns per-message evaluations into the RFC 7489
@@ -98,21 +134,20 @@ func Example_aggregateReport() {
 	// Output: xml=true rows=1 gzipped=true
 }
 
-// ExampleParseRecord reads every tag of a record, here RFC 7489 Appendix
-// B.2.4's: the omitted tags take their defaults, and the second report URI
-// carries its 10 MiB size limit.
+// ExampleParseRecord reads every tag of a record, here RFC 9989 Appendix
+// B.2.5's, which asks for test mode: the omitted tags take their defaults.
 func ExampleParseRecord() {
 	rec, err := dmarc.ParseRecord("v=DMARC1; p=quarantine; rua=mailto:dmarc-feedback@example.com," +
-		"mailto:tld-test@thirdparty.example.net!10m; pct=25")
+		"mailto:tld-test@thirdparty.example.net; t=y")
 	if err != nil {
 		panic(err) // not a DMARC record, or one with no usable policy
 	}
-	fmt.Println(rec.Policy, rec.Pct, rec.ADKIM, rec.ReportInterval)
-	for _, u := range rec.RUA {
-		fmt.Println(u.URI, u.MaxSize == math.MaxUint64, u.MaxSize)
+	fmt.Println(rec.Policy, rec.Testing, rec.ADKIM, rec.PSD)
+	for _, uri := range rec.RUA {
+		fmt.Println(uri)
 	}
 	// Output:
-	// quarantine 25 relaxed 86400
-	// mailto:dmarc-feedback@example.com true 18446744073709551615
-	// mailto:tld-test@thirdparty.example.net false 10485760
+	// quarantine true relaxed u
+	// mailto:dmarc-feedback@example.com
+	// mailto:tld-test@thirdparty.example.net
 }

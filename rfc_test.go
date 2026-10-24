@@ -1,32 +1,22 @@
 package dmarc
 
 import (
-	"bufio"
-	"math"
-	"os"
 	"reflect"
-	"regexp"
-	"slices"
 	"strings"
 	"testing"
-
-	"golang.org/x/net/publicsuffix"
 )
 
-// The examples of RFC 7489 Appendix B, and the Public Suffix List's own test
-// cases, as tests.
+// The examples of RFC 9989 Appendix B as tests.
 
-// TestRFC7489RecordExamples parses the records of RFC 7489 Appendix B.2,
-// including B.2.4's two aggregate URIs, one with a 10m size limit. The
-// records are given as their zone files publish them: several
-// character-strings, which DNS returns joined.
+// TestRFC9989RecordExamples parses the records of RFC 9989 Appendix B.2,
+// including B.2.5's two aggregate URIs and test mode. The records are given
+// as their zone files publish them: several character-strings, which DNS
+// returns joined.
 //
-// checklist: DMARC-URI-01 DMARC-URI-02 DMARC-URI-05 DMARC-REC-06
-func TestRFC7489RecordExamples(t *testing.T) {
-	const max = math.MaxUint64
+// checklist: DMARC-URI-01 DMARC-URI-05 DMARC-REC-06 DMARC-REC-21
+func TestRFC9989RecordExamples(t *testing.T) {
 	defaults := func(r Record) Record {
-		r.ADKIM, r.ASPF, r.Pct, r.ReportInterval = AlignmentRelaxed, AlignmentRelaxed, 100, 86400
-		r.FailureOptions, r.ReportFormats = []string{"0"}, []string{"afrf"}
+		r.PSD, r.ADKIM, r.ASPF, r.FailureOptions = "u", AlignmentRelaxed, AlignmentRelaxed, []string{"0"}
 		return r
 	}
 	cases := []struct {
@@ -35,22 +25,21 @@ func TestRFC7489RecordExamples(t *testing.T) {
 		want    Record
 	}{
 		{"B.2.1", []string{"v=DMARC1; p=none; ", "rua=mailto:dmarc-feedback@example.com"},
-			defaults(Record{Policy: "none", RUA: []ReportURI{{"mailto:dmarc-feedback@example.com", max}}})},
+			defaults(Record{Policy: "none", RUA: []string{"mailto:dmarc-feedback@example.com"}})},
 		{"B.2.2", []string{"v=DMARC1; p=none; ", "rua=mailto:dmarc-feedback@example.com; ", "ruf=mailto:auth-reports@example.com"},
-			defaults(Record{Policy: "none", RUA: []ReportURI{{"mailto:dmarc-feedback@example.com", max}},
-				RUF: []ReportURI{{"mailto:auth-reports@example.com", max}}})},
+			defaults(Record{Policy: "none", RUA: []string{"mailto:dmarc-feedback@example.com"},
+				RUF: []string{"mailto:auth-reports@example.com"}})},
 		{"B.2.3", []string{"v=DMARC1; p=none; ", "rua=mailto:dmarc-feedback@example.com; ", "ruf=mailto:auth-reports@thirdparty.example.net"},
-			defaults(Record{Policy: "none", RUA: []ReportURI{{"mailto:dmarc-feedback@example.com", max}},
-				RUF: []ReportURI{{"mailto:auth-reports@thirdparty.example.net", max}}})},
-		{"B.2.4", []string{"v=DMARC1; p=quarantine; ", "rua=mailto:dmarc-feedback@example.com,", "mailto:tld-test@thirdparty.example.net!10m; ", "pct=25"},
+			defaults(Record{Policy: "none", RUA: []string{"mailto:dmarc-feedback@example.com"},
+				RUF: []string{"mailto:auth-reports@thirdparty.example.net"}})},
+		{"B.2.5, testing", []string{"v=DMARC1; p=quarantine; ", "rua=mailto:dmarc-feedback@example.com,", "mailto:tld-test@thirdparty.example.net; ", "t=y"},
 			func() Record {
-				r := defaults(Record{Policy: "quarantine", RUA: []ReportURI{
-					{"mailto:dmarc-feedback@example.com", max}, {"mailto:tld-test@thirdparty.example.net", 10 << 20}}})
-				r.Pct = 25
+				r := defaults(Record{Policy: "quarantine", RUA: []string{"mailto:dmarc-feedback@example.com", "mailto:tld-test@thirdparty.example.net"}})
+				r.Testing = true
 				return r
 			}()},
-		{"B.3.1", []string{"v=DMARC1; p=reject; aspf=r;", " rua=mailto:dmarc-feedback@example.com"},
-			defaults(Record{Policy: "reject", RUA: []ReportURI{{"mailto:dmarc-feedback@example.com", max}}})},
+		{"B.2.5, enforcing", []string{"v=DMARC1; p=reject; ", "rua=mailto:dmarc-feedback@example.com,", "mailto:tld-test@thirdparty.example.net"},
+			defaults(Record{Policy: "reject", RUA: []string{"mailto:dmarc-feedback@example.com", "mailto:tld-test@thirdparty.example.net"}})},
 	}
 	for _, c := range cases {
 		got, err := ParseRecord(strings.Join(c.strings, ""))
@@ -60,227 +49,173 @@ func TestRFC7489RecordExamples(t *testing.T) {
 	}
 }
 
-// TestRFC7489AlignmentExamples runs the examples of RFC 7489 Appendix B.1 and
-// B.3.1 through AlignedMode in both modes.
+// TestRFC9989AlignmentExamples runs the examples of RFC 9989 Appendix B.1 and
+// §4.4's table through AlignedMode in both modes, with example.com, example.net
+// and sample.net each publishing a record.
 //
 // checklist: DMARC-ALIGN-02 DMARC-ALIGN-03
-func TestRFC7489AlignmentExamples(t *testing.T) {
+func TestRFC9989AlignmentExamples(t *testing.T) {
+	z := dmarcZone(map[string]string{
+		"example.com": "v=DMARC1; p=none",
+		"example.net": "v=DMARC1; p=none",
+		"sample.net":  "v=DMARC1; p=none",
+	})
 	cases := []struct {
 		name            string
 		auth, from      string
 		relaxed, strict bool
 	}{
 		{"B.1.1 example 1 (SPF, identical)", "example.com", "example.com", true, true},
-		{"B.1.1 example 2 (SPF, parent)", "child.example.com", "example.com", true, false},
+		{"B.1.1 example 2 (SPF, child)", "child.example.com", "example.com", true, false},
 		{"B.1.1 example 3 (SPF, not aligned)", "example.net", "child.example.com", false, false},
 		{"B.1.2 example 1 (DKIM, identical)", "example.com", "example.com", true, true},
 		{"B.1.2 example 2 (DKIM, parent)", "example.com", "child.example.com", true, false},
-		{"B.1.2 example 3 (DKIM, not aligned)", "sample.net", "child.example.com", false, false},
-		{"3.1.1 (d=example.com, From news.example.com)", "example.com", "news.example.com", true, false},
-		{"3.1.1 (d=com never aligns)", "com", "news.example.com", false, false},
-		{"3.1.2 (cbg.bounces.example.com)", "cbg.bounces.example.com", "example.com", true, false},
-		{"B.3.1 (SPF mail.example.com)", "mail.example.com", "example.com", true, false},
-		{"B.3.1 (DKIM example.com)", "example.com", "example.com", true, true},
+		{"B.1.2 example 3 (DKIM, not aligned)", "example.net", "child.example.com", false, false},
+		{"§4.4 table, relaxed", "foo.example.com", "news.example.com", true, false},
+		{"§4.4 table, strict", "news.example.com", "news.example.com", true, true},
+		{"§4.4 table, none", "foo.example.net", "news.example.com", false, false},
+		{"d=com", "com", "news.example.com", false, false},
 	}
 	for _, c := range cases {
-		if got := AlignedMode(c.auth, c.from, AlignmentRelaxed, pslOrgDomain); got != c.relaxed {
-			t.Errorf("%s: relaxed = %v, want %v", c.name, got, c.relaxed)
-		}
-		if got := AlignedMode(c.auth, c.from, AlignmentStrict, pslOrgDomain); got != c.strict {
-			t.Errorf("%s: strict = %v, want %v", c.name, got, c.strict)
+		for mode, want := range map[AlignmentMode]bool{AlignmentRelaxed: c.relaxed, AlignmentStrict: c.strict} {
+			if got, err := AlignedMode(c.auth, c.from, mode, z.lookup); err != nil || got != want {
+				t.Errorf("%s: %v = %v, %v; want %v", c.name, mode, got, err, want)
+			}
 		}
 	}
 }
 
-// TestRFC7489DiscoveryWalk follows RFC 7489 §6.6.3 for the domains of
-// Appendix B.2: test.example.com publishes its own record (B.2.4), any other
-// subdomain of example.com falls back to the Organizational Domain's record
-// (B.2.1), and the queries go to exactly the names the RFC lists.
+// TestRFC9989TreeWalkExamples follows RFC 9989 Appendix B.4: the
+// Organizational Domains of an Author Domain, its RFC5321.MailFrom domain and
+// a DKIM-Authenticated Identifier, the queries each Tree Walk sends, the
+// alignments they give and the record that applies.
 //
-// checklist: DMARC-DISC-02 DMARC-DISC-04 DMARC-DISC-10
-func TestRFC7489DiscoveryWalk(t *testing.T) {
-	zone := map[string][]string{
-		"_dmarc.example.com":      {"v=DMARC1; p=none; rua=mailto:dmarc-feedback@example.com"},
-		"_dmarc.test.example.com": {"v=DMARC1; p=quarantine; rua=mailto:dmarc-feedback@example.com,mailto:tld-test@thirdparty.example.net!10m; pct=25"},
-	}
-	cases := []struct {
-		from      string
-		queries   []string
-		domain    string
-		requested string
-		viaOrg    bool
-	}{
-		{"example.com", []string{"_dmarc.example.com"}, "example.com", "none", false},
-		{"test.example.com", []string{"_dmarc.test.example.com"}, "test.example.com", "quarantine", false},
-		{"a.b.example.com", []string{"_dmarc.a.b.example.com", "_dmarc.example.com"}, "example.com", "none", true},
-		// The record at test.example.com is not the Organizational Domain's, so
-		// a subdomain of it falls back to example.com, not to test.example.com
-		// (§6.3: "sp" is ignored for records published on subdomains).
-		{"x.test.example.com", []string{"_dmarc.x.test.example.com", "_dmarc.example.com"}, "example.com", "none", true},
-	}
-	for _, c := range cases {
-		var queries []string
-		resolver := func(name string) ([]string, error) {
-			queries = append(queries, name)
-			return zone[name], nil
+// checklist: DMARC-DISC-04 DMARC-DISC-05 DMARC-ORG-01 DMARC-ALIGN-02 DMARC-DISC-19
+func TestRFC9989TreeWalkExamples(t *testing.T) {
+	t.Run("B.4.1 simple", func(t *testing.T) {
+		z := dmarcZone(map[string]string{"example.com": "v=DMARC1; p=reject", "signing.example.com": "v=DMARC1; p=none"})
+		if org, err := OrgDomain("example.com", z.lookup); err != nil || org != "example.com" {
+			t.Errorf("OrgDomain(example.com) = %q, %v", org, err)
 		}
-		p, err := Discover(c.from, resolver, pslOrgDomain)
-		if err != nil {
-			t.Fatalf("%s: %v", c.from, err)
+		if want := []string{"_dmarc.example.com", "_dmarc.com"}; !reflect.DeepEqual(z.queried, want) {
+			t.Errorf("queried %q, want %q", z.queried, want)
 		}
-		if !reflect.DeepEqual(queries, c.queries) || p.Domain != c.domain || p.Requested != c.requested || p.ViaOrgDomain != c.viaOrg {
-			t.Errorf("%s: queries %q, got %+v; want queries %q, domain %s, requested %s, via org %v",
-				c.from, queries, p, c.queries, c.domain, c.requested, c.viaOrg)
+		z.queried = nil
+		if org, err := OrgDomain("signing.example.com", z.lookup); err != nil || org != "example.com" {
+			t.Errorf("OrgDomain(signing.example.com) = %q, %v", org, err)
 		}
-	}
+		if want := []string{"_dmarc.signing.example.com", "_dmarc.example.com", "_dmarc.com"}; !reflect.DeepEqual(z.queried, want) {
+			t.Errorf("queried %q, want %q", z.queried, want)
+		}
+		if ok, err := AlignedMode("signing.example.com", "example.com", AlignmentRelaxed, z.lookup); !ok || err != nil {
+			t.Errorf("DKIM not aligned: %v, %v", ok, err)
+		}
+		if p, err := Discover("example.com", z.lookup, nil); err != nil || p.Domain != "example.com" || p.Inherited {
+			t.Errorf("Discover = %+v, %v; want the Author Domain's own record", p, err)
+		}
+	})
+
+	t.Run("B.4.2 deep", func(t *testing.T) {
+		const author = "a.b.c.d.e.f.g.h.i.j.k.example.com"
+		z := dmarcZone(map[string]string{"example.com": "v=DMARC1; p=reject", "signing.example.com": "v=DMARC1; p=none"})
+		if org, err := OrgDomain(author, z.lookup); err != nil || org != "example.com" {
+			t.Errorf("OrgDomain = %q, %v", org, err)
+		}
+		want := []string{"_dmarc.a.b.c.d.e.f.g.h.i.j.k.example.com", "_dmarc.g.h.i.j.k.example.com",
+			"_dmarc.h.i.j.k.example.com", "_dmarc.i.j.k.example.com", "_dmarc.j.k.example.com",
+			"_dmarc.k.example.com", "_dmarc.example.com", "_dmarc.com"}
+		if !reflect.DeepEqual(z.queried, want) {
+			t.Errorf("queried %q\nwant %q", z.queried, want)
+		}
+		for _, id := range []string{"example.com", "signing.example.com"} {
+			if ok, err := AlignedMode(id, author, AlignmentRelaxed, z.lookup); !ok || err != nil {
+				t.Errorf("%s not aligned: %v, %v", id, ok, err)
+			}
+		}
+		z.queried = nil
+		if p, err := Discover(author, z.lookup, nil); err != nil || p.Domain != "example.com" || !p.Inherited {
+			t.Errorf("Discover = %+v, %v; want example.com's record", p, err)
+		}
+		if !reflect.DeepEqual(z.queried, want) {
+			t.Errorf("Discover queried %q\nwant %q", z.queried, want)
+		}
+	})
+
+	t.Run("B.4.3 PSD", func(t *testing.T) {
+		z := dmarcZone(map[string]string{"giant.bank.example": "v=DMARC1; p=reject", "bank.example": "v=DMARC1; p=none; psd=y"})
+		for domain, want := range map[string]string{
+			"giant.bank.example":      "giant.bank.example",
+			"mail.giant.bank.example": "giant.bank.example",
+			"mail.mega.bank.example":  "mega.bank.example",
+		} {
+			z.queried = nil
+			if org, err := OrgDomain(domain, z.lookup); err != nil || org != want {
+				t.Errorf("OrgDomain(%s) = %q, %v; want %s", domain, org, err, want)
+			}
+			if last := z.queried[len(z.queried)-1]; last != "_dmarc.bank.example" {
+				t.Errorf("OrgDomain(%s): the walk went on past the psd=y record to %s", domain, last)
+			}
+		}
+		if ok, err := AlignedMode("mail.giant.bank.example", "giant.bank.example", AlignmentRelaxed, z.lookup); !ok || err != nil {
+			t.Errorf("SPF not aligned: %v, %v", ok, err)
+		}
+		if ok, err := AlignedMode("mail.mega.bank.example", "giant.bank.example", AlignmentRelaxed, z.lookup); ok || err != nil {
+			t.Errorf("DKIM aligned: %v, %v", ok, err)
+		}
+		if p, err := Discover("giant.bank.example", z.lookup, nil); err != nil || p.Domain != "giant.bank.example" || p.Requested != "reject" {
+			t.Errorf("Discover = %+v, %v; want giant.bank.example's own record", p, err)
+		}
+	})
 }
 
-// TestRFC7489ThirdPartyExample checks the external destinations of RFC 7489
-// §7.1 and Appendix B.2.3: reports for example.com may go to
+// TestRFC9989ThirdPartyExample checks the external destinations of RFC 9989
+// Appendix B.2.3 and B.2.4: failure reports for example.com may go to
 // thirdparty.example.net once it publishes v=DMARC1 at
-// example.com._report._dmarc.thirdparty.example.net, and not before; §7.1's
-// blue.example.com and red.example.net example likewise.
+// example.com._report._dmarc.thirdparty.example.net, and not before; its
+// ruf= there overrides the address; and RFC 7489 §7.1's blue.example.com and
+// red.example.net example likewise.
 //
-// checklist: DMARC-EXT-01 DMARC-EXT-03
-func TestRFC7489ThirdPartyExample(t *testing.T) {
+// checklist: DMARC-EXT-01 DMARC-EXT-03 DMARC-EXT-04
+func TestRFC9989ThirdPartyExample(t *testing.T) {
 	rec := mustParse(t, "v=DMARC1; p=none; rua=mailto:dmarc-feedback@example.com; ruf=mailto:auth-reports@thirdparty.example.net")
-	var queries []string
-	authorized := map[string][]string{"example.com._report._dmarc.thirdparty.example.net": {"v=DMARC1"}}
-	resolver := func(name string) ([]string, error) {
-		queries = append(queries, name)
-		return authorized[name], nil
-	}
-	got, err := AuthorizeReportURIs("example.com", "ruf", rec.RUF, resolver, pslOrgDomain)
+	z := dmarcZone(map[string]string{"example.com": "v=DMARC1; p=none; rua=mailto:dmarc-feedback@example.com"})
+	z.records["example.com._report._dmarc.thirdparty.example.net"] = []string{"v=DMARC1;"}
+	got, err := AuthorizeReportURIs("example.com", "ruf", rec.RUF, z.lookup)
 	if err != nil || !reflect.DeepEqual(got, rec.RUF) {
 		t.Errorf("ruf: got %+v, %v; want %+v", got, err, rec.RUF)
 	}
-	if got, err := AuthorizeReportURIs("example.com", "rua", rec.RUA, resolver, pslOrgDomain); err != nil || !reflect.DeepEqual(got, rec.RUA) {
+	if got, err := AuthorizeReportURIs("example.com", "rua", rec.RUA, z.lookup); err != nil || !reflect.DeepEqual(got, rec.RUA) {
 		t.Errorf("rua inside the Organizational Domain: got %+v, %v", got, err)
 	}
-	if want := []string{"example.com._report._dmarc.thirdparty.example.net"}; !reflect.DeepEqual(queries, want) {
-		t.Errorf("queries %q, want %q", queries, want)
+	var asked []string
+	for _, q := range z.queried {
+		if strings.Contains(q, "._report.") {
+			asked = append(asked, q)
+		}
+	}
+	if want := []string{"example.com._report._dmarc.thirdparty.example.net"}; !reflect.DeepEqual(asked, want) {
+		t.Errorf("asked %q, want %q", asked, want)
+	}
+
+	// B.2.4: the third party's ruf= replaces the address.
+	z.records["example.com._report._dmarc.thirdparty.example.net"] = []string{
+		"v=DMARC1; rua=mailto:aggregate-reports@thirdparty.example.net; ruf=mailto:failure-reports@thirdparty.example.net"}
+	if got, err := AuthorizeReportURIs("example.com", "ruf", rec.RUF, z.lookup); err != nil ||
+		!reflect.DeepEqual(got, []string{"mailto:failure-reports@thirdparty.example.net"}) {
+		t.Errorf("override: got %+v, %v", got, err)
 	}
 
 	// Before the third party publishes its record, the URI is ignored.
-	authorized = nil
-	if got, err := AuthorizeReportURIs("example.com", "ruf", rec.RUF, resolver, pslOrgDomain); err != nil || len(got) != 0 {
+	delete(z.records, "example.com._report._dmarc.thirdparty.example.net")
+	if got, err := AuthorizeReportURIs("example.com", "ruf", rec.RUF, z.lookup); err != nil || len(got) != 0 {
 		t.Errorf("unauthorized: got %+v, %v; want none", got, err)
 	}
 
-	// §7.1's own example.
+	// RFC 7489 §7.1's example.
 	blue := mustParse(t, "v=DMARC1; p=none; rua=mailto:reports@red.example.net")
-	queries = nil
-	authorized = map[string][]string{"blue.example.com._report._dmarc.red.example.net": {"v=DMARC1"}}
-	if got, err := AuthorizeReportURIs("blue.example.com", "rua", blue.RUA, resolver, pslOrgDomain); err != nil || !reflect.DeepEqual(got, blue.RUA) {
+	z = dmarcZone(nil)
+	z.records["blue.example.com._report._dmarc.red.example.net"] = []string{"v=DMARC1"}
+	if got, err := AuthorizeReportURIs("blue.example.com", "rua", blue.RUA, z.lookup); err != nil || !reflect.DeepEqual(got, blue.RUA) {
 		t.Errorf("blue/red: got %+v, %v", got, err)
-	}
-	if want := []string{"blue.example.com._report._dmarc.red.example.net"}; !reflect.DeepEqual(queries, want) {
-		t.Errorf("blue/red queries %q, want %q", queries, want)
-	}
-}
-
-// pslOrgDomain is an OrgDomainFunc backed by the Public Suffix List of
-// golang.org/x/net/publicsuffix (a test-only dependency): the public suffix
-// plus one label, or "" for a public suffix itself.
-func pslOrgDomain(domain string) string {
-	org, err := publicsuffix.EffectiveTLDPlusOne(domain)
-	if err != nil {
-		return ""
-	}
-	return org
-}
-
-// pslCase is one checkPublicSuffix line of the PSL's test file.
-type pslCase struct {
-	input, org string // org is "" for null
-}
-
-var checkPublicSuffixLine = regexp.MustCompile(`^checkPublicSuffix\((null|'[^']*'), (null|'[^']*')\);$`)
-
-// readPSLCases reads testdata/psl/test_psl.txt, the Public Suffix List's own
-// test cases (public domain), skipping the null input.
-func readPSLCases(t *testing.T) []pslCase {
-	t.Helper()
-	f, err := os.Open("testdata/psl/test_psl.txt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = f.Close() }()
-	var cases []pslCase
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		m := checkPublicSuffixLine.FindStringSubmatch(strings.TrimSpace(sc.Text()))
-		if m == nil || m[1] == "null" {
-			continue
-		}
-		c := pslCase{input: strings.Trim(m[1], "'")}
-		if m[2] != "null" {
-			c.org = strings.Trim(m[2], "'")
-		}
-		cases = append(cases, c)
-	}
-	if len(cases) < 75 {
-		t.Fatalf("read only %d cases from test_psl.txt", len(cases))
-	}
-	return cases
-}
-
-// TestPSLOrgDomains runs the Public Suffix List's test cases through the
-// organizational-domain logic with a PSL-backed OrgDomainFunc: the hook gets
-// names in the A-label form the cases expect (mixed case and U-labels
-// included); a name whose Organizational Domain the PSL gives aligns with it
-// and with its siblings, and finds that domain's policy by the §6.6.3
-// fallback; and two names under a public suffix never align. It also records
-// where the registry-free DefaultOrgDomain gets these cases wrong.
-//
-// checklist: DMARC-ORG-01 DMARC-ALIGN-04 DMARC-DISC-04
-func TestPSLOrgDomains(t *testing.T) {
-	var heuristicWrong []string
-	for _, c := range readPSLCases(t) {
-		input := normalizeDomain(c.input)
-		want := normalizeDomain(c.org)
-		if strings.HasPrefix(c.input, ".") {
-			// A leading dot is not a domain: it never aligns and sends no query.
-			if AlignedOrg(c.input, c.input, pslOrgDomain) {
-				t.Errorf("%q aligns with itself", c.input)
-			}
-			continue
-		}
-		if got := pslOrgDomain(input); got != want {
-			t.Errorf("org domain of %q (%q) = %q, want %q", c.input, input, got, want)
-		}
-		if want == "" {
-			// A public suffix has no Organizational Domain: two registrations
-			// under it are different organizations.
-			if AlignedOrg("a."+c.input, "b."+c.input, pslOrgDomain) {
-				t.Errorf("a.%s and b.%s align, but %s is a public suffix", c.input, c.input, c.input)
-			}
-			if AlignedOrg("a."+c.input, "b."+c.input, nil) {
-				heuristicWrong = append(heuristicWrong, c.input)
-			}
-			continue
-		}
-		if !AlignedOrg(c.input, c.org, pslOrgDomain) || !AlignedOrg("x."+c.org, "y."+c.org, pslOrgDomain) {
-			t.Errorf("%q does not align with %q or its siblings", c.input, c.org)
-		}
-		if input != want {
-			resolver := func(name string) ([]string, error) {
-				if name == "_dmarc."+want {
-					return []string{"v=DMARC1; p=reject"}, nil
-				}
-				return nil, nil
-			}
-			p, err := Discover(c.input, resolver, pslOrgDomain)
-			if err != nil || !p.ViaOrgDomain || p.Domain != want || p.Requested != "reject" {
-				t.Errorf("Discover(%q) = %+v, %v; want the policy of %s", c.input, p, err, want)
-			}
-		}
-	}
-	// The two-label heuristic treats every two-label public suffix in the
-	// list as an organization, so registrations under it falsely align.
-	for _, suffix := range []string{"uk.com", "ac.jp", "kyoto.jp", "ak.us", "xn--55qx5d.cn", "公司.cn"} {
-		if !slices.Contains(heuristicWrong, suffix) {
-			t.Errorf("DefaultOrgDomain now handles %s; update the README and this test", suffix)
-		}
 	}
 }

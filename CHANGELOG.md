@@ -6,6 +6,49 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+The receiver side follows RFC 9989, which obsoleted RFC 7489 in May 2026
+(rest-mail/rest-mail-server#730). Aggregate reports keep RFC 7489's format
+until they move to RFC 9990, before this is released. CHECKLIST.md is now an
+RFC 9989 checklist for the receiver.
+
+### Breaking
+
+- **The Organizational Domain comes from the DNS Tree Walk** (RFC 9989
+  §4.10, §4.10.2), not from a Public Suffix List. `OrgDomainFunc`,
+  `DefaultOrgDomain`, `Aligned` and `AlignedOrg` are gone; `OrgDomain(domain,
+  resolver)` finds it, and `AlignedMode(auth, from, mode, resolver)` and
+  `AuthorizeReportURIs(domain, tag, uris, resolver)` take a resolver instead
+  of an `OrgDomainFunc`. `AlignedMode` returns an error for a DNS failure.
+- **`Discover(domain, resolver, exists)`** walks the tree when the Author
+  Domain has no record and applies its Organizational Domain's record, or
+  else its Public Suffix Domain's (`Policy.PSD`); `Policy.ViaOrgDomain` is
+  now `Policy.Inherited`. Several records at one name are discarded and the
+  walk goes on, where RFC 7489 ended discovery. `exists`, an `ExistsFunc`,
+  says whether the Author Domain exists, for `np=`.
+- **`Policy.Applied`** is the policy to apply: `Requested` one level lower
+  when the record asks for test mode (`t=y`).
+- **`Record`** gains `NonExistentPolicy` (`np=`), `PSD` (`psd=`) and
+  `Testing` (`t=`), and loses `Pct`, `ReportFormats` and `ReportInterval`:
+  `pct=`, `rf=` and `ri=` are unknown tags now, and ignored. An invalid `np=`
+  leaves the record without a policy, as an invalid `sp=` does.
+- **Report URIs are strings.** `Record.RUA` and `Record.RUF` are `[]string`;
+  `ReportURI` and its `MaxSize` are gone, since RFC 9989 makes the `!` size
+  limit obsolete. A URI that carries one is still read, without it.
+- **`fo=`** follows RFC 9989's grammar: `0` and `1` exclude each other, and
+  `d` and `s` appear at most once; any other list takes the default `0`.
+
+### Changed
+
+- `policy_published` reports `pct` as 100, the share of failing messages a
+  policy now applies to, until the RFC 9990 format drops the element.
+- The tests run RFC 9989's Appendix B examples, including the three Tree
+  Walks of B.4. The Public Suffix List fixture and its test are gone.
+
+## [0.4.1] - 2026-10-22
+
+0.4.0 (2026-10-17) shipped all of this except the RFC 8616 §6 rule for
+report addresses (#41) and the further checklist rows (#37 to #40).
+
 go-dmarc now meets the standard of rest-mail/rest-mail-server#374: an RFC
 7489 checklist checked in CI, a 95% coverage gate, fuzzing, the RFC's examples
 as tests, and differential tests against go-msgauth. Writing the checklist

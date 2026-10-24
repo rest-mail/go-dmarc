@@ -12,7 +12,7 @@ import (
 
 // TestAggregateRecords_GroupsAndCounts checks that identical rows are summed into one count and every message is counted.
 //
-// checklist: DMARC-AGG-05 DMARC-POL-07
+// checklist: DMARC-AGG-05
 func TestAggregateRecords_GroupsAndCounts(t *testing.T) {
 	recs := []AggregateRecord{
 		{Domain: "example.test", SourceIP: "10.0.0.1", HeaderFrom: "a@example.test", Disposition: "none",
@@ -311,8 +311,10 @@ func TestReportValidatesAgainstAppendixC(t *testing.T) {
 }
 
 // TestBuildReportPolicyPublished checks policy_published: NewPolicyPublished
-// takes the discovered record's values with their defaults, and BuildReport
-// writes the required sp, pct and fo even when the caller leaves them empty.
+// takes the discovered record's values with their defaults, with pct 100
+// whatever the record says, since RFC 9989 applies a policy to every failing
+// message, and BuildReport writes the required sp, pct and fo even when the
+// caller leaves them empty.
 //
 // checklist: DMARC-XML-03 DMARC-AGG-01
 func TestBuildReportPolicyPublished(t *testing.T) {
@@ -323,11 +325,11 @@ func TestBuildReportPolicyPublished(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := PolicyPublished{Domain: "example.test", ADKIM: "s", ASPF: "r", P: "quarantine", SP: "quarantine", PCT: 25, FO: "1:d"}
+	want := PolicyPublished{Domain: "example.test", ADKIM: "s", ASPF: "r", P: "quarantine", SP: "quarantine", PCT: 100, FO: "1:d"}
 	if got := NewPolicyPublished(pol); got != want {
 		t.Errorf("NewPolicyPublished = %+v, want %+v", got, want)
 	}
-	if got := NewPolicyPublished(Policy{Domain: "x.test", Record: Record{Policy: "reject", SubdomainPolicy: "none", Pct: 100}}); got.SP != "none" || got.FO != "0" || got.PCT != 100 {
+	if got := NewPolicyPublished(Policy{Domain: "x.test", Record: Record{Policy: "reject", SubdomainPolicy: "none"}}); got.SP != "none" || got.FO != "0" || got.PCT != 100 {
 		t.Errorf("NewPolicyPublished without fo: %+v", got)
 	}
 	recs := []AggregateRecord{{Domain: "example.test", SourceIP: "192.0.2.1"}}

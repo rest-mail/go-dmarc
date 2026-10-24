@@ -1,15 +1,16 @@
 package dmarc
 
 import (
-	"math"
 	"reflect"
+	"strings"
 	"testing"
 )
 
 // TestRFC8616ULabels checks RFC 8616 §6, which updates RFC 7489 §§6.6.1 and
-// 7.1: every U-label in a domain DMARC handles is converted to an A-label
-// before further processing. The From domain is looked up and aligned as
-// A-labels, and the policy domain in a §7.1 authorization query is an A-label.
+// 7.1 (RFC 9989 §5.3.1 says the same): every U-label in a domain DMARC
+// handles is converted to an A-label before further processing. The From
+// domain is looked up and aligned as A-labels, and the policy domain in a
+// §7.1 authorization query is an A-label.
 //
 // checklist: DMARC-EAI-01 DMARC-EAI-02
 func TestRFC8616ULabels(t *testing.T) {
@@ -20,7 +21,7 @@ func TestRFC8616ULabels(t *testing.T) {
 	if err != nil || p.Requested != "reject" {
 		t.Fatalf("Discover = %+v, %v", p, err)
 	}
-	want := []string{"_dmarc.mail.xn--bcher-kva.example", "_dmarc.xn--bcher-kva.example"}
+	want := []string{"_dmarc.mail.xn--bcher-kva.example", "_dmarc.xn--bcher-kva.example", "_dmarc.example"}
 	if !reflect.DeepEqual(r.queries, want) {
 		t.Errorf("queried %q, want %q", r.queries, want)
 	}
@@ -28,21 +29,26 @@ func TestRFC8616ULabels(t *testing.T) {
 		{"bücher.example", "xn--bcher-kva.example"},
 		{"mail.xn--bcher-kva.example", "Bücher.Example"},
 	} {
-		if !Aligned(c[0], c[1]) || !AlignedMode(c[0], c[1], AlignmentRelaxed, nil) {
-			t.Errorf("%q and %q do not align as A-labels", c[0], c[1])
+		if ok, err := AlignedMode(c[0], c[1], AlignmentRelaxed, r.lookup); !ok || err != nil {
+			t.Errorf("%q and %q do not align as A-labels: %v", c[0], c[1], err)
 		}
 	}
 
-	r = &tracingResolver{zone: map[string][]string{
-		"xn--bcher-kva.example._report._dmarc.reports.test": {"v=DMARC1"},
-	}}
-	uris := []ReportURI{{"mailto:d@reports.test", math.MaxUint64}}
-	got, err := AuthorizeReportURIs("bücher.example", "rua", uris, r.lookup, nil)
+	r.zone["xn--bcher-kva.example._report._dmarc.reports.test"] = []string{"v=DMARC1"}
+	r.queries = nil
+	uris := []string{"mailto:d@reports.test"}
+	got, err := AuthorizeReportURIs("bücher.example", "rua", uris, r.lookup)
 	if err != nil || !reflect.DeepEqual(got, uris) {
 		t.Errorf("AuthorizeReportURIs = %+v, %v; want %+v", got, err, uris)
 	}
-	if want := []string{"xn--bcher-kva.example._report._dmarc.reports.test"}; !reflect.DeepEqual(r.queries, want) {
-		t.Errorf("queried %q, want %q", r.queries, want)
+	var asked []string
+	for _, q := range r.queries {
+		if strings.Contains(q, "._report.") {
+			asked = append(asked, q)
+		}
+	}
+	if want := []string{"xn--bcher-kva.example._report._dmarc.reports.test"}; !reflect.DeepEqual(asked, want) {
+		t.Errorf("asked %q, want %q", asked, want)
 	}
 }
 
@@ -55,12 +61,11 @@ func TestRFC8616ULabels(t *testing.T) {
 //
 // checklist: DMARC-EAI-03
 func TestRFC8616ConventionalReportAddresses(t *testing.T) {
-	const max = math.MaxUint64
-	valid := []ReportURI{
-		{"mailto:a@example.test", max},
-		{"mailto:b@xn--bcher-kva.example", 1 << 20},
-		{"MAILTO:c%2Bd@example.test?subject=dmarc", max},
-		{"https://reports.example.test/r%C3%A9", max},
+	valid := []string{
+		"mailto:a@example.test",
+		"mailto:b@xn--bcher-kva.example",
+		"MAILTO:c%2Bd@example.test?subject=dmarc",
+		"https://reports.example.test/r%C3%A9",
 	}
 	cases := []string{
 		"mailto:rëports@example.test",

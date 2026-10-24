@@ -19,25 +19,30 @@ import (
 // override is used. URIs whose host cannot be found (a mailto: without an
 // address, say) are dropped.
 //
-// A resolver error other than not-found is returned with the URIs checked so
-// far, so the caller can try again later (§7.1 step 4). A nil resolver uses
-// net.LookupTXT and a nil orgDomain uses [DefaultOrgDomain].
-func AuthorizeReportURIs(policyDomain, tag string, uris []ReportURI, resolver TXTResolver, orgDomain OrgDomainFunc) ([]ReportURI, error) {
-	if orgDomain == nil {
-		orgDomain = DefaultOrgDomain
-	}
+// The Organizational Domains come from DNS Tree Walks ([OrgDomain], RFC 9989
+// §4.10.2). A resolver error other than not-found is returned with the URIs
+// checked so far, so the caller can try again later (§7.1 step 4). A nil
+// resolver uses net.LookupTXT.
+func AuthorizeReportURIs(policyDomain, tag string, uris []string, resolver TXTResolver) ([]string, error) {
 	policyDomain, ok := queryDomain(policyDomain)
-	if !ok {
+	if !ok || len(uris) == 0 {
 		return nil, nil
 	}
-	policyOrg, _ := queryDomain(orgDomain(policyDomain))
-	var out []ReportURI
+	policyOrg, err := OrgDomain(policyDomain, resolver)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
 	for _, u := range uris {
-		host, ok := reportURIHost(u.URI)
+		host, ok := reportURIHost(u)
 		if !ok {
 			continue
 		}
-		if hostOrg, ok := queryDomain(orgDomain(host)); ok && hostOrg == policyOrg {
+		hostOrg, err := OrgDomain(host, resolver)
+		if err != nil {
+			return out, err
+		}
+		if hostOrg == policyOrg {
 			out = append(out, u)
 			continue
 		}
@@ -57,7 +62,7 @@ func AuthorizeReportURIs(policyDomain, tag string, uris []ReportURI, resolver TX
 		// the original nor the override is used.
 		sameHost := true
 		for _, o := range override {
-			if h, ok := reportURIHost(o.URI); !ok || h != host {
+			if h, ok := reportURIHost(o); !ok || h != host {
 				sameHost = false
 			}
 		}
@@ -70,13 +75,13 @@ func AuthorizeReportURIs(policyDomain, tag string, uris []ReportURI, resolver TX
 
 // overrideURIs returns the valid URIs of tag in the first confirming record
 // that carries it, or nil when none does.
-func overrideURIs(records []string, tag string) []ReportURI {
+func overrideURIs(records []string, tag string) []string {
 	tag = strings.ToLower(tag)
 	for _, rec := range records {
 		for _, part := range strings.Split(rec, ";")[1:] {
 			name, value, found := strings.Cut(part, "=")
 			if found && strings.EqualFold(strings.TrimSpace(name), tag) {
-				return append([]ReportURI{}, parseReportURIs(strings.TrimSpace(value))...)
+				return append([]string{}, parseReportURIs(strings.TrimSpace(value))...)
 			}
 		}
 	}

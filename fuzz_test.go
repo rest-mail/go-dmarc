@@ -2,7 +2,6 @@ package dmarc
 
 import (
 	"encoding/xml"
-	"math"
 	"reflect"
 	"slices"
 	"strings"
@@ -27,6 +26,7 @@ func FuzzParseRecord(f *testing.F) {
 	for _, seed := range []string{
 		"v=DMARC1; p=reject; rua=mailto:a@example.com!18446744073709551615t, mailto:b@example.com!0",
 		"v=DMARC1; p=none; ruf=mailto:x@y.test; fo=0:1:d:s; rf=afrf:iodef; ri=4294967296",
+		"v=DMARC1; p=none; sp=reject; np=quarantine; psd=y; t=y; ruf=mailto:x@y.test; fo=d:1:s",
 		"v=DMARC1;;;=;p=;=reject", "v=DMARC1; p=none; rua=,,,!,mailto:!1k", "v=DMARC1\x00; p=none",
 	} {
 		f.Add(seed)
@@ -47,18 +47,24 @@ func FuzzParseRecord(f *testing.F) {
 		}
 		if !slices.Contains([]string{"none", "quarantine", "reject"}, r.Policy) ||
 			!slices.Contains([]string{"", "none", "quarantine", "reject"}, r.SubdomainPolicy) ||
-			r.Pct < 0 || r.Pct > 100 || len(r.FailureOptions) == 0 || len(r.ReportFormats) == 0 {
+			!slices.Contains([]string{"", "none", "quarantine", "reject"}, r.NonExistentPolicy) ||
+			!slices.Contains([]string{"y", "n", "u"}, r.PSD) || len(r.FailureOptions) == 0 {
 			t.Fatalf("invalid values %+v", r)
 		}
+		seen := map[string]bool{}
 		for _, o := range r.FailureOptions {
-			if !slices.Contains([]string{"0", "1", "d", "s"}, o) || len(r.RUF) == 0 && o != "0" {
+			if !slices.Contains([]string{"0", "1", "d", "s"}, o) || len(r.RUF) == 0 && o != "0" || seen[o] {
 				t.Fatalf("fo %q with ruf %v", r.FailureOptions, r.RUF)
 			}
+			seen[o] = true
+		}
+		if seen["0"] && seen["1"] {
+			t.Fatalf("fo %q has both 0 and 1", r.FailureOptions)
 		}
 		for _, u := range append(slices.Clone(r.RUA), r.RUF...) {
-			again, ok := parseReportURI(u.URI)
-			if !ok || again.URI != u.URI || again.MaxSize != math.MaxUint64 {
-				t.Fatalf("URI %q does not parse again: %+v, %v", u.URI, again, ok)
+			again, ok := parseReportURI(u)
+			if !ok || again != u {
+				t.Fatalf("URI %q does not parse again: %q, %v", u, again, ok)
 			}
 		}
 		if _, err := msgauth.Parse(txt); err == nil && plainTags(txt) {
@@ -72,8 +78,9 @@ func FuzzParseRecord(f *testing.F) {
 }
 
 // plainTags reports whether every tag of a record is lower-case and appears
-// once, and the first is v=DMARC1: the records on which go-msgauth and this
-// parser must agree.
+// once, the first is v=DMARC1, and there is no np=, which go-msgauth (RFC
+// 7489) does not know and an invalid value of which leaves this parser's
+// record without a policy: the records on which the two must agree.
 func plainTags(txt string) bool {
 	if !hasDMARCVersion(txt) {
 		return false
@@ -85,7 +92,7 @@ func plainTags(txt string) bool {
 			continue
 		}
 		name = strings.TrimSpace(name)
-		if name != strings.ToLower(name) || seen[name] {
+		if name != strings.ToLower(name) || seen[name] || name == "np" {
 			return false
 		}
 		seen[name] = true
@@ -93,10 +100,12 @@ func plainTags(txt string) bool {
 	return true
 }
 
-// FuzzAlignment checks alignment on any pair of identifiers: it never panics,
-// is symmetric, strict alignment implies relaxed alignment, an identifier
-// aligns with itself exactly when it is a domain, and the A-label form agrees
-// with golang.org/x/net/idna's punycode.
+// FuzzAlignment checks alignment on any pair of identifiers, against a DNS
+// where every two-label name publishes a record: it never panics, sends no
+// more than eight queries for each name, is symmetric, strict alignment
+// implies relaxed alignment, an identifier aligns with itself exactly when it
+// is a domain, and the A-label form agrees with golang.org/x/net/idna's
+// punycode.
 //
 // checklist: DMARC-ALIGN-01 DMARC-ALIGN-02 DMARC-ALIGN-03
 func FuzzAlignment(f *testing.F) {
@@ -109,17 +118,35 @@ func FuzzAlignment(f *testing.F) {
 		f.Add(seed[0], seed[1])
 	}
 	f.Fuzz(func(t *testing.T, a, b string) {
+		queries := 0
+		resolver := func(name string) ([]string, error) {
+			queries++
+			if strings.Count(name, ".") == 2 {
+				return []string{"v=DMARC1; p=none"}, nil
+			}
+			return nil, nil
+		}
+		align := func(x, y string, mode AlignmentMode) bool {
+			ok, err := AlignedMode(x, y, mode, resolver)
+			if err != nil {
+				t.Fatalf("AlignedMode(%q, %q, %v): %v", x, y, mode, err)
+			}
+			return ok
+		}
 		for _, mode := range []AlignmentMode{AlignmentRelaxed, AlignmentStrict} {
-			if AlignedMode(a, b, mode, nil) != AlignedMode(b, a, mode, nil) {
+			if align(a, b, mode) != align(b, a, mode) {
 				t.Fatalf("%v alignment of %q and %q is not symmetric", mode, a, b)
 			}
 		}
-		if AlignedMode(a, b, AlignmentStrict, nil) && !AlignedMode(a, b, AlignmentRelaxed, nil) {
+		if align(a, b, AlignmentStrict) && !align(a, b, AlignmentRelaxed) {
 			t.Fatalf("%q and %q align strictly but not relaxed", a, b)
 		}
+		if queries > 5*16 {
+			t.Fatalf("five alignments sent %d queries", queries)
+		}
 		d, ok := queryDomain(a)
-		if Aligned(a, a) != ok {
-			t.Fatalf("Aligned(%q, %q) = %v, but queryDomain says %v", a, a, !ok, ok)
+		if align(a, a, AlignmentRelaxed) != ok {
+			t.Fatalf("AlignedMode(%q, %q) = %v, but queryDomain says %v", a, a, !ok, ok)
 		}
 		if !ok {
 			return
@@ -142,18 +169,23 @@ func FuzzAlignment(f *testing.F) {
 }
 
 // FuzzDiscover discovers the policy of any domain against any pair of
-// records, one at the domain and one at its Organizational Domain: it never
-// panics, queries only _dmarc names of valid domains, and returns a policy
-// that either is empty or was parsed from the record it names.
+// records, one at the domain and one at every name above it: it never
+// panics, queries only _dmarc names of valid domains, at most eight, and
+// returns a policy that either is empty or was parsed from the record it
+// names, with the policy it applies the requested one or, in test mode, one
+// level lower.
 //
-// checklist: DMARC-DISC-01 DMARC-DISC-02 DMARC-DISC-04
+// checklist: DMARC-DISC-01 DMARC-DISC-02 DMARC-DISC-04 DMARC-DISC-05
 func FuzzDiscover(f *testing.F) {
 	f.Add("mail.example.com", "v=DMARC1; p=reject", "v=DMARC1; p=none; sp=quarantine")
 	f.Add("Mail.Bücher.Example.", "", "v=DMARC1; sp=reject; rua=mailto:a@b.test")
 	f.Add("a..b", "v=DMARC1; p=reject", "")
 	f.Add("x.y.z.example.com", "v=spf1 -all", "v=DMARC1; p=bogus")
+	f.Add("a.b.c.d.e.f.g.h.i.j.example.com", "", "v=DMARC1; p=reject; t=y; psd=n")
 	f.Fuzz(func(t *testing.T, domain, exact, org string) {
+		queries := 0
 		resolver := func(name string) ([]string, error) {
+			queries++
 			rest, ok := strings.CutPrefix(name, "_dmarc.")
 			if _, valid := queryDomain(rest); !ok || !valid || rest != normalizeDomain(rest) {
 				t.Fatalf("queried %q", name)
@@ -167,8 +199,11 @@ func FuzzDiscover(f *testing.F) {
 		if err != nil {
 			t.Fatalf("error %v", err)
 		}
+		if queries > 8 {
+			t.Fatalf("%d queries", queries)
+		}
 		if p.Raw == "" {
-			if p.Requested != "none" || p.ViaOrgDomain || p.Domain != "" {
+			if p.Requested != "none" || p.Applied != "none" || p.Inherited || p.PSD || p.Domain != "" {
 				t.Fatalf("empty policy %+v", p)
 			}
 			return
@@ -179,6 +214,10 @@ func FuzzDiscover(f *testing.F) {
 		}
 		if !slices.Contains([]string{rec.Policy, rec.SubdomainPolicy}, p.Requested) {
 			t.Fatalf("requested %q is not the record's", p.Requested)
+		}
+		lower := map[string]string{"reject": "quarantine", "quarantine": "none", "none": "none"}
+		if p.Applied != p.Requested && !(rec.Testing && p.Applied == lower[p.Requested]) {
+			t.Fatalf("applied %q for requested %q, testing %v", p.Applied, p.Requested, rec.Testing)
 		}
 	})
 }

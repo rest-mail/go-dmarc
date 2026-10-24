@@ -2,19 +2,20 @@
 
 [![CI](https://github.com/rest-mail/go-dmarc/actions/workflows/ci.yml/badge.svg)](https://github.com/rest-mail/go-dmarc/actions/workflows/ci.yml)
 [![Coverage gate: >=95%](https://img.shields.io/badge/coverage%20gate-%3E%3D95%25-brightgreen)](COVERAGE.md)
-[![Checklist: 70/113 mapped](https://img.shields.io/badge/checklist-70%2F113%20mapped-blue)](CHECKLIST.md)
+[![Checklist: 73/106 mapped](https://img.shields.io/badge/checklist-73%2F106%20mapped-blue)](CHECKLIST.md)
 [![Go Reference](https://pkg.go.dev/badge/github.com/rest-mail/go-dmarc.svg)](https://pkg.go.dev/github.com/rest-mail/go-dmarc)
 [![Go Report Card](https://goreportcard.com/badge/github.com/rest-mail/go-dmarc)](https://goreportcard.com/report/github.com/rest-mail/go-dmarc)
 
-The receiver side of DMARC ([RFC 7489](https://www.rfc-editor.org/rfc/rfc7489))
+The receiver side of DMARC ([RFC 9989](https://www.rfc-editor.org/rfc/rfc9989))
 for Go, from the [REST Mail](https://rest-mail.com) project: policy lookup and
-parsing, identifier alignment, and aggregate (rua) report generation. Standard
-library only, no external dependencies.
+parsing with the DNS Tree Walk, identifier alignment, and aggregate (rua)
+report generation. Standard library only, no external dependencies.
 
 It is checked item by item against the RFC in [CHECKLIST.md](CHECKLIST.md).
-RFC 7489 has since been obsoleted by DMARCbis (RFCs 9989, 9990 and 9991, May
-2026); the checklist says why it still follows RFC 7489 and where DMARCbis
-differs.
+RFC 9989 (May 2026) obsoletes RFC 7489, and the receiver side follows it.
+Aggregate reports still use RFC 7489's format until they move to
+[RFC 9990](https://www.rfc-editor.org/rfc/rfc9990); the checklist says what
+changed.
 
 ## About
 
@@ -28,51 +29,40 @@ or `reject` — and later reports what it observed back to the domain owner.
 This package holds no storage or scheduling state. A mail pipeline consults the
 policy and alignment primitives per message and records the outcomes however it
 likes; a reporter later hands a slice of neutral `AggregateRecord` values to
-`BuildReport` to emit the RFC 7489 aggregate-report document.
+`BuildReport` to emit the aggregate-report document.
 
 ## Features
 
-- **Record parsing** — `ParseRecord` reads every RFC 7489 tag (`p`, `sp`,
-  `adkim`, `aspf`, `pct`, `fo`, `rf`, `ri`, `rua`, `ruf`) into a `Record`, with
-  defaults for the tags a record omits or gets wrong, and report URIs with their
-  `!` size limits. `ParsePolicy` reads only `p=`.
-- **Policy discovery** — `Discover` resolves a From domain's policy with the
-  RFC 7489 §6.6.3 organizational-domain fallback (a subdomain with no record of
-  its own inherits the org domain's `sp=`/`p=`), and handles a record without a
-  valid policy as §6.6.3 step 6 says. `Lookup` fetches a single
-  `_dmarc.<domain>` TXT record. Domains are looked up as A-labels.
+- **Record parsing** — `ParseRecord` reads every RFC 9989 tag (`p`, `sp`,
+  `np`, `psd`, `t`, `adkim`, `aspf`, `fo`, `rua`, `ruf`) into a `Record`, with
+  defaults for the tags a record omits or gets wrong. The tags RFC 9989
+  removed (`pct`, `rf`, `ri`) are ignored like any unknown tag, and so is the
+  obsolete `!` size limit of a report URI. `ParsePolicy` reads only `p=`.
+- **Policy discovery** — `Discover` finds an Author Domain's policy (RFC 9989
+  §4.10.1): its own record, or else, by the DNS Tree Walk (§4.10), its
+  Organizational Domain's or its Public Suffix Domain's, whose `sp=` applies
+  (or `np=` when the domain does not exist, asked through an `ExistsFunc`).
+  `Policy.Requested` is the policy published and `Policy.Applied` the one to
+  apply, one level lower in test mode (`t=y`). `Lookup` fetches a single
+  `_dmarc.<domain>` TXT record. Domains are looked up as A-labels, and no
+  walk sends more than eight queries.
 - **Identifier alignment** — `AlignedMode` evaluates relaxed or strict
-  alignment (RFC 7489 §3.1) under the record's `adkim=`/`aspf=` mode;
-  `AlignedOrg` and `Aligned` are its relaxed forms.
+  alignment (RFC 9989 §4.4) under the record's `adkim=`/`aspf=` mode;
+  `OrgDomain` finds the Organizational Domain relaxed alignment compares
+  (§4.10.2), from DNS rather than a Public Suffix List.
 - **Aggregate reporting** — `AggregateRecords` groups per-message evaluations
   into report rows, `BuildReport` marshals an aggregate report that validates
-  against RFC 7489's Appendix C schema (with policy-override reasons such as
-  `sampled_out`), `NewPolicyPublished` describes the discovered policy, and
-  `Gzip` compresses the report for the `application/gzip` attachment (§7.2.1).
-- **External report destinations** — `AuthorizeReportURIs` performs the §7.1
-  check that a `rua=`/`ruf=` address outside the domain agreed to receive its
-  reports, including the destination's override.
-- **Injectable DNS & org-domain** — `Lookup`/`Discover` take a `TXTResolver`
-  (its signature matches `net.LookupTXT`) for tests and custom lookups, and
-  `Discover` takes an `OrgDomainFunc` for organizational-domain derivation
-  (`nil` uses system DNS and the built-in heuristic respectively).
+  against RFC 7489's Appendix C schema (with policy-override reasons),
+  `NewPolicyPublished` describes the discovered policy, and `Gzip` compresses
+  the report for the `application/gzip` attachment.
+- **External report destinations** — `AuthorizeReportURIs` performs the check
+  that a `rua=`/`ruf=` address outside the domain's Organizational Domain
+  agreed to receive its reports, including the destination's override.
+- **Injectable DNS** — every function that queries DNS takes a `TXTResolver`
+  (its signature matches `net.LookupTXT`, and `nil` uses it) for tests and
+  custom lookups.
 - **Zero external dependencies** — standard library only (the tests use
-  go-msgauth and golang.org/x/net; the library does not). Organizational-domain
-  derivation defaults to a registry-free heuristic (`DefaultOrgDomain`) that
-  takes the last two labels, which is **wrong under multi-label public
-  suffixes**: it treats `co.uk` as an organization, so `attacker.co.uk` aligns
-  with `victim.co.uk`. Pass a Public Suffix List-backed `OrgDomainFunc` (e.g.
-  wrapping `golang.org/x/net/publicsuffix`) wherever that matters:
-
-  ```go
-  func orgDomain(domain string) string {
-  	org, err := publicsuffix.EffectiveTLDPlusOne(domain)
-  	if err != nil {
-  		return "" // a public suffix has no Organizational Domain
-  	}
-  	return org
-  }
-  ```
+  go-msgauth and golang.org/x/net; the library does not).
 
 ## Install
 
@@ -98,8 +88,8 @@ import (
 
 func main() {
 	// The record published at _dmarc.example.com. In production, discover the
-	// policy with dmarc.Discover("example.com", nil, nil) (which also handles the
-	// organizational-domain fallback for subdomains); a literal keeps this DNS-free.
+	// policy with dmarc.Discover("example.com", nil, nil) (which also walks the
+	// DNS tree for subdomains); a literal keeps this DNS-free.
 	record := "v=DMARC1; p=reject; adkim=r; aspf=r; rua=mailto:agg@example.com"
 	policy, err := dmarc.ParsePolicy(record) // "none" | "quarantine" | "reject"
 	if err != nil {
@@ -111,7 +101,13 @@ func main() {
 	fromDomain := "example.com"
 	spfDomain, spfPass := "bounce.marketing.net", true
 
-	dmarcPass := spfPass && dmarc.Aligned(spfDomain, fromDomain)
+	// Relaxed alignment compares Organizational Domains, which a DNS Tree Walk
+	// finds; pass nil for system DNS.
+	aligned, err := dmarc.AlignedMode(spfDomain, fromDomain, dmarc.AlignmentRelaxed, nil)
+	if err != nil {
+		panic(err) // a DNS failure: the policy cannot be applied (RFC 9989 §5.3.6)
+	}
+	dmarcPass := spfPass && aligned
 
 	disposition := "none"
 	if !dmarcPass {
@@ -125,7 +121,7 @@ func main() {
 ## Aggregate reports
 
 Collect one `AggregateRecord` per evaluated message, then marshal them into the
-RFC 7489 aggregate-report document and gzip it for delivery:
+aggregate-report document and gzip it for delivery:
 
 ```go
 meta := dmarc.ReportMetadata{
@@ -155,20 +151,25 @@ SPF/DKIM verdict.
 
 ## Choices the RFC leaves open
 
-Where RFC 7489 leaves a detail to the implementation, this package takes the
+Where RFC 9989 leaves a detail to the implementation, this package takes the
 simplest secure option:
 
 - **Tag names and enumerated values** match in any case (`P=Reject`), as the
-  ABNF's quoted strings do, but `v=DMARC1`'s value must be upper case: §6.3
-  says it "MUST match precisely".
-- **`p=` may come anywhere after `v=`**. §6.3 asks publishers to put it
-  second, but refusing records that do not would switch their policy off.
+  ABNF's quoted strings do, but `v=DMARC1`'s value must be upper case: §4.7
+  says it "is case sensitive".
 - **A tag with a syntax error, or a repeated tag, takes its default.** A
-  repeated or invalid `p=` (or an invalid `sp=`) leaves the record without a
-  policy, which §6.6.3 step 6 then settles: `p=none` when `rua=` names a valid
-  URI, no DMARC otherwise.
-- **A report URI** must be absolute (have a scheme) and contain no whitespace;
-  its size limit must fit in 64 bits. Invalid URIs are left out of the list.
+  repeated or invalid `p=` (or an invalid `sp=` or `np=`) leaves the record
+  without a policy, which §4.10.1 then settles: `p=none` when `rua=` names a
+  valid URI, no DMARC otherwise. A record without a valid policy still counts
+  in the Tree Walk, so its `psd=` decides the Organizational Domain.
+- **A report URI** must be absolute (have a scheme) and contain no whitespace,
+  and an obsolete size limit after it must be digits with an optional unit;
+  the limit itself is dropped. Invalid URIs are left out of the list.
+- **Whether a domain exists** for `np=` is the caller's to say: `Discover`
+  asks its `ExistsFunc` only when the record that applies has `np=`, and with
+  none takes the domain to exist.
+- **A DNS error** during discovery or alignment is returned, so the caller
+  decides whether to fail open or closed (§4.10.1, §5.3.6).
 - **A domain** must be at most 253 characters of labels of 1 to 63 letters,
   digits, hyphens or underscores, after lower-casing and conversion of
   U-labels to A-labels. Anything else has no policy (no DNS query is sent) and
@@ -200,29 +201,29 @@ CI also fails below 95% statement coverage; the lines left uncovered on
 purpose are listed, each with a reason, in [COVERAGE.md](COVERAGE.md). The fuzz
 targets are `FuzzParseRecord` (any TXT record, compared with go-msgauth where
 both must agree), `FuzzAlignment` (alignment is symmetric, strict implies
-relaxed, and the A-labels match golang.org/x/net/idna's punycode),
-`FuzzDiscover` (discovery against any records) and `FuzzBuildReport` (any
-report validates against the schema); CI runs each for 30 seconds. Their seeds
+relaxed, the Tree Walks stay within their queries, and the A-labels match
+golang.org/x/net/idna's punycode), `FuzzDiscover` (discovery against any
+records, in at most eight queries) and `FuzzBuildReport` (any report validates
+against the schema); CI runs each for 30 seconds. Their seeds
 are in the targets, and inputs that once failed are kept there or in
 `testdata/fuzz`.
 
 The coverage badge shows the enforced minimum; measured statement coverage
 is printed in each CI run's **Verify RFC** log. The checklist badge counts
-requirements mapped to tests over all checklist rows, including the 43
+requirements mapped to tests over all checklist rows, including the 33
 `n/a` rows with documented reasons. CI checks the badge against the actual
 checklist and its test mappings. The CI badge reports whether verification
 passed.
 
-The RFC's own examples are tests: the records of Appendix B.2 (including the
-two report URIs and size limit of B.2.4), the alignment examples of B.1 and
-B.3.1, the discovery walk for B.2's domains, and the third-party destination
-of B.2.3 and §7.1. Every report shape is validated against the Appendix C
-schema, which `schema_test.go` encodes. The Public Suffix List's own test
-cases ([`testdata/psl`](testdata/psl), public domain) run through alignment
-and discovery with a PSL-backed `OrgDomainFunc`. Differential tests check the
-record parser against [go-msgauth](https://github.com/emersion/go-msgauth)
-(MIT), listing each place where the two disagree on purpose and why. go-msgauth
-and golang.org/x/net are test-only dependencies; the library does not import
+RFC 9989's own examples are tests: the records of Appendix B.2 (including
+B.2.5's two report URIs and test mode), the alignment examples of B.1 and
+§4.4, the three Tree Walks of B.4 (with the queries each sends), and the
+third-party destination and override of B.2.3 and B.2.4. Every report shape is
+validated against RFC 7489's Appendix C schema, which `schema_test.go`
+encodes. Differential tests check the record parser against
+[go-msgauth](https://github.com/emersion/go-msgauth) (MIT, RFC 7489), listing
+each place where the two disagree on purpose and why. go-msgauth and
+golang.org/x/net are test-only dependencies; the library does not import
 them.
 
 ### The RFC checklist
@@ -282,7 +283,8 @@ Full API reference:
 
 Recent releases — see [CHANGELOG.md](CHANGELOG.md) for the complete history.
 
-- **Unreleased** — breaking: `ParseRecord` and `Record` replace `ParsePct`/`ParseADKIM`/`ParseASPF`, and `Policy` carries the parsed `Record`; invalid optional tags take their defaults and an invalid policy follows §6.6.3 step 6 instead of erroring; `v=DMARC1` is case-sensitive; reports validate against Appendix C (`sp`, `pct`, `fo`, an `spf` result and full IPv6 always written) with override reasons; adds `AuthorizeReportURIs` (§7.1); fixes a quadratic punycode slowdown on long domains; an RFC checklist, a 95% coverage gate, fuzzing and differential tests.
+- **Unreleased** — breaking: the receiver side follows RFC 9989: the DNS Tree Walk finds the Organizational Domain (`OrgDomain`) and the policy (`Discover`, with the PSD's record and `np=`), `AlignedMode` and `AuthorizeReportURIs` take a resolver, `t=` test mode gives `Policy.Applied`, and `pct=`, `rf=`, `ri=` and URI size limits are ignored.
+- **v0.4.1** (2026-10-22) — breaking: `ParseRecord` and `Record` replace `ParsePct`/`ParseADKIM`/`ParseASPF`, and `Policy` carries the parsed `Record`; invalid optional tags take their defaults and an invalid policy follows §6.6.3 step 6 instead of erroring; `v=DMARC1` is case-sensitive; reports validate against Appendix C (`sp`, `pct`, `fo`, an `spf` result and full IPv6 always written) with override reasons; adds `AuthorizeReportURIs` (§7.1); fixes a quadratic punycode slowdown on long domains; an RFC checklist, a 95% coverage gate, fuzzing and differential tests.
 - **v0.3.0** (2026-07-25) — breaking: `ParsePolicy`/`ParsePct` now return errors (invalid `p=`/`pct=` rejected); adds strict-alignment mode (`AlignmentMode`, ADKIM/ASPF) + RFC 7489 App C `rua` XML fixes.
 - **v0.2.0** (2026-07-25) — breaking: `AggregateRecord` carries per-identifier `DKIM`/`SPF` auth slices; adds `Discover` with organizational-domain fallback and PSL-backed `AlignedOrg`.
 - **v0.1.1** (2026-07-23) — module renamed to `github.com/rest-mail/go-dmarc`.

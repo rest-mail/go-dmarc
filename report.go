@@ -1,7 +1,7 @@
-// Package dmarc implements the receiver side of DMARC (RFC 7489): looking up and
-// parsing a domain's published policy, evaluating identifier alignment, and
-// generating aggregate (rua) report XML. It depends only on the Go standard
-// library.
+// Package dmarc implements the receiver side of DMARC (RFC 9989): looking up
+// and parsing a domain's published policy with the DNS Tree Walk, evaluating
+// identifier alignment, and generating aggregate (rua) report XML (RFC 7489
+// Appendix C, until RFC 9990). It depends only on the Go standard library.
 //
 // DMARC (Domain-based Message Authentication, Reporting, and Conformance) lets
 // the owner of a From domain publish, at _dmarc.<domain>, how receivers should
@@ -17,28 +17,27 @@
 //
 // # Policy discovery and evaluation
 //
-// [Discover] performs full policy discovery for a From domain, including the
-// RFC 7489 §6.6.3 Organizational-Domain fallback: when a subdomain publishes no
-// record of its own, it applies the organizational domain's subdomain policy
-// (the sp= tag, or p= when sp= is absent). [ParseRecord] reads every tag of a
-// record, with defaults for those it omits or gets wrong; [Lookup] is the
-// lower-level primitive that fetches the raw record at exactly _dmarc.<domain>,
-// and [ParsePolicy] reads only a record's p=. [AlignedMode] reports whether an
+// [Discover] performs policy discovery for an Author Domain (RFC 9989
+// §4.10.1): its own record, or else, by the DNS Tree Walk (§4.10), the record
+// of its Organizational Domain or its Public Suffix Domain, whose subdomain
+// policy applies (sp=, np= for a domain that does not exist, else p=), one
+// level lower in test mode (t=y). [ParseRecord] reads every tag of a record,
+// with defaults for those it omits or gets wrong; [Lookup] is the lower-level
+// primitive that fetches the raw record at exactly _dmarc.<domain>, and
+// [ParsePolicy] reads only a record's p=. [AlignedMode] reports whether an
 // authenticated domain — from an SPF smtp.mailfrom or a verified DKIM
 // signature's d= — aligns with the From domain under the record's adkim= or
-// aspf= mode:
+// aspf= mode, comparing the Organizational Domains [OrgDomain] finds:
 //
-//	policy, _ := dmarc.Discover("mail.example.com", nil, orgDomain)
-//	if !dmarc.AlignedMode(dkimDomain, "mail.example.com", policy.Record.ADKIM, orgDomain) &&
-//		policy.Requested == "reject" {
-//		// no aligned identifier passed: reject per published policy
+//	policy, _ := dmarc.Discover("mail.example.com", nil, nil)
+//	aligned, _ := dmarc.AlignedMode(dkimDomain, "mail.example.com", policy.Record.ADKIM, nil)
+//	if !aligned && policy.Applied == "reject" {
+//		// no aligned identifier passed: weigh the published policy (§5.4)
 //	}
 //
-// The Organizational Domain needs the Public Suffix List, which this package
-// does not carry: pass an [OrgDomainFunc] backed by one (a wrapper around
-// golang.org/x/net/publicsuffix.EffectiveTLDPlusOne). With nil, the
-// two-label [DefaultOrgDomain] heuristic is used, which wrongly aligns two
-// registrants under a multi-label public suffix such as co.uk.
+// The Organizational Domain comes from DNS, not from the Public Suffix List:
+// the Tree Walk reads the records published above a domain, and a Public
+// Suffix Domain that publishes one with psd=y marks itself.
 //
 // # Aggregate reporting
 //
@@ -192,8 +191,10 @@ func NewPolicyPublished(p Policy) PolicyPublished {
 		ASPF:   alignmentLetter(r.ASPF),
 		P:      r.Policy,
 		SP:     sp,
-		PCT:    r.Pct,
-		FO:     fo,
+		// RFC 9989 removed pct=: a policy applies to every failing message.
+		// The RFC 7489 report schema still requires the element.
+		PCT: 100,
+		FO:  fo,
 	}
 }
 

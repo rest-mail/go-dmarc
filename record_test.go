@@ -2,7 +2,6 @@ package dmarc
 
 import (
 	"errors"
-	"math"
 	"net"
 	"reflect"
 	"testing"
@@ -21,17 +20,15 @@ func mustParse(t testing.TB, record string) Record {
 // TestParseRecordDefaults checks the default of every tag a minimal record
 // omits.
 //
-// checklist: DMARC-REC-11 DMARC-REC-13 DMARC-REC-16 DMARC-REC-10
+// checklist: DMARC-REC-13 DMARC-REC-10 DMARC-REC-20 DMARC-REC-21
 func TestParseRecordDefaults(t *testing.T) {
 	got := mustParse(t, "v=DMARC1; p=reject")
 	want := Record{
 		Policy:         "reject",
+		PSD:            "u",
 		ADKIM:          AlignmentRelaxed,
 		ASPF:           AlignmentRelaxed,
-		Pct:            100,
 		FailureOptions: []string{"0"},
-		ReportFormats:  []string{"afrf"},
-		ReportInterval: 86400,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %+v\nwant %+v", got, want)
@@ -62,12 +59,12 @@ func TestParseRecordVersion(t *testing.T) {
 //
 // checklist: DMARC-REC-05 DMARC-REC-06
 func TestParseRecordSyntax(t *testing.T) {
-	want := mustParse(t, "v=DMARC1; p=quarantine; sp=reject; adkim=s; pct=50; rua=mailto:a@example.test")
+	want := mustParse(t, "v=DMARC1; p=quarantine; sp=reject; np=reject; adkim=s; rua=mailto:a@example.test")
 	for _, rec := range []string{
-		"v=DMARC1;p=quarantine;sp=reject;adkim=s;pct=50;rua=mailto:a@example.test",
-		"v=DMARC1 ;  p = quarantine ;\tsp=reject; adkim =s ; pct= 50; rua=mailto:a@example.test;",
-		"v=DMARC1; rua=mailto:a@example.test; pct=50; adkim=s; sp=reject; p=quarantine",
-		"v=DMARC1; p=quarantine; ; sp=reject;; adkim=s; pct=50; rua=mailto:a@example.test; x=1; future=yes; junk",
+		"v=DMARC1;p=quarantine;sp=reject;np=reject;adkim=s;rua=mailto:a@example.test",
+		"v=DMARC1 ;  p = quarantine ;\tsp=reject; np= reject; adkim =s ; rua=mailto:a@example.test;",
+		"v=DMARC1; rua=mailto:a@example.test; adkim=s; np=reject; sp=reject; p=quarantine",
+		"v=DMARC1; p=quarantine; ; sp=reject;; np=reject; adkim=s; rua=mailto:a@example.test; x=1; future=yes; junk",
 	} {
 		if got := mustParse(t, rec); !reflect.DeepEqual(got, want) {
 			t.Errorf("ParseRecord(%q) = %+v, want %+v", rec, got, want)
@@ -75,47 +72,73 @@ func TestParseRecordSyntax(t *testing.T) {
 	}
 }
 
-// TestParseRecordPolicy checks p= and sp= and the §6.6.3 step 6 rule for a
+// TestParseRecordRemovedTags checks that pct=, rf= and ri=, which RFC 9989
+// removed, are unknown tags now: whatever they hold, the record reads as if
+// they were absent.
+//
+// checklist: DMARC-REC-11 DMARC-REC-05
+func TestParseRecordRemovedTags(t *testing.T) {
+	want := mustParse(t, "v=DMARC1; p=reject; ruf=mailto:f@example.test")
+	for _, rec := range []string{
+		"v=DMARC1; p=reject; pct=0; ruf=mailto:f@example.test",
+		"v=DMARC1; p=reject; pct=50; rf=afrf; ri=3600; ruf=mailto:f@example.test",
+		"v=DMARC1; p=reject; pct=bogus; rf=iodef; ri=-1; ruf=mailto:f@example.test",
+		"v=DMARC1; p=reject; pct=10; pct=20; ruf=mailto:f@example.test",
+	} {
+		if got := mustParse(t, rec); !reflect.DeepEqual(got, want) {
+			t.Errorf("ParseRecord(%q) = %+v, want %+v", rec, got, want)
+		}
+	}
+}
+
+// TestParseRecordPolicy checks p=, sp= and np= and the §4.10.1 rule for a
 // record without a valid policy: p=none when it names a valid rua= URI, and
 // no DMARC otherwise.
 //
-// checklist: DMARC-REC-08 DMARC-DISC-06 DMARC-DISC-07
+// checklist: DMARC-REC-08 DMARC-REC-19 DMARC-DISC-06 DMARC-DISC-07
 func TestParseRecordPolicy(t *testing.T) {
-	cases := []struct{ record, p, sp string }{
-		{"v=DMARC1; p=none", "none", ""},
-		{"v=DMARC1; p=quarantine", "quarantine", ""},
-		{"v=DMARC1; p=reject; sp=none", "reject", "none"},
-		{"v=DMARC1; p=none; sp=quarantine", "none", "quarantine"},
+	cases := []struct{ record, p, sp, np string }{
+		{"v=DMARC1; p=none", "none", "", ""},
+		{"v=DMARC1; p=quarantine", "quarantine", "", ""},
+		{"v=DMARC1; p=reject; sp=none", "reject", "none", ""},
+		{"v=DMARC1; p=none; sp=quarantine", "none", "quarantine", ""},
+		{"v=DMARC1; p=none; np=reject", "none", "", "reject"},
+		{"v=DMARC1; p=none; sp=quarantine; np=reject", "none", "quarantine", "reject"},
 		// No valid policy, but a valid rua=: read as p=none.
-		{"v=DMARC1; rua=mailto:a@example.test", "none", ""},
-		{"v=DMARC1; p=bogus; rua=mailto:a@example.test", "none", ""},
-		{"v=DMARC1; p=reject; sp=bogus; rua=mailto:a@example.test", "none", ""},
-		{"v=DMARC1; p=reject; p=reject; rua=mailto:a@example.test", "none", ""},
-		{"v=DMARC1; p=reject; sp=none; sp=none; rua=mailto:a@example.test", "none", ""},
+		{"v=DMARC1; rua=mailto:a@example.test", "none", "", ""},
+		{"v=DMARC1; p=bogus; rua=mailto:a@example.test", "none", "", ""},
+		{"v=DMARC1; p=reject; sp=bogus; rua=mailto:a@example.test", "none", "", ""},
+		{"v=DMARC1; p=reject; np=bogus; rua=mailto:a@example.test", "none", "", ""},
+		{"v=DMARC1; p=reject; np=; rua=mailto:a@example.test", "none", "", ""},
+		{"v=DMARC1; p=reject; p=reject; rua=mailto:a@example.test", "none", "", ""},
+		{"v=DMARC1; p=reject; sp=none; sp=none; rua=mailto:a@example.test", "none", "", ""},
+		{"v=DMARC1; p=reject; np=none; np=none; rua=mailto:a@example.test", "none", "", ""},
 	}
 	for _, c := range cases {
 		r := mustParse(t, c.record)
-		if r.Policy != c.p || r.SubdomainPolicy != c.sp {
-			t.Errorf("ParseRecord(%q) p=%q sp=%q, want p=%q sp=%q", c.record, r.Policy, r.SubdomainPolicy, c.p, c.sp)
+		if r.Policy != c.p || r.SubdomainPolicy != c.sp || r.NonExistentPolicy != c.np {
+			t.Errorf("ParseRecord(%q) p=%q sp=%q np=%q, want p=%q sp=%q np=%q", c.record,
+				r.Policy, r.SubdomainPolicy, r.NonExistentPolicy, c.p, c.sp, c.np)
 		}
 	}
 	// No valid policy and no valid rua=: DMARC does not apply.
 	for _, rec := range []string{"v=DMARC1", "v=DMARC1;", "v=DMARC1; p=", "v=DMARC1; p=bogus", "v=DMARC1; p=rejct",
-		"v=DMARC1; p=reject; sp=bogus", "v=DMARC1; p=none; p=reject", "v=DMARC1; p=bogus; rua=nonsense",
-		"v=DMARC1; sp=reject", "v=DMARC1; p=bogus; ruf=mailto:a@example.test"} {
+		"v=DMARC1; p=reject; sp=bogus", "v=DMARC1; p=reject; np=bogus", "v=DMARC1; p=none; p=reject",
+		"v=DMARC1; p=bogus; rua=nonsense", "v=DMARC1; sp=reject", "v=DMARC1; np=reject",
+		"v=DMARC1; p=bogus; ruf=mailto:a@example.test"} {
 		if r, err := ParseRecord(rec); !errors.Is(err, ErrNoPolicy) {
 			t.Errorf("ParseRecord(%q) = %+v, %v; want ErrNoPolicy", rec, r, err)
 		}
 	}
 }
 
-// TestParsePolicy checks the p=-only shortcut the server uses.
+// TestParsePolicy checks the p=-only shortcut.
 //
 // checklist: DMARC-REC-08 DMARC-DISC-06 DMARC-DISC-07
 func TestParsePolicy(t *testing.T) {
 	cases := []struct{ record, want string }{
 		{"v=DMARC1; p=reject; rua=mailto:agg@example.test", "reject"},
-		{"v=DMARC1; p=quarantine; pct=50", "quarantine"},
+		{"v=DMARC1; p=quarantine; t=y", "quarantine"},
 		{"v=DMARC1; P=Reject", "reject"},
 		{"v=DMARC1; sp=reject; rua=mailto:agg@example.test", "none"},
 	}
@@ -137,12 +160,12 @@ func TestParsePolicy(t *testing.T) {
 //
 // checklist: DMARC-REC-17
 func TestParseRecordCaseInsensitive(t *testing.T) {
-	r := mustParse(t, "V=DMARC1; P=Reject; SP=QUARANTINE; ADKIM=S; Aspf=S; PCT=10; FO=D:S; RF=AFRF; RI=3600; RUF=mailto:Fail@Example.test; RUA=MailTo:Agg@Example.test!10M")
+	r := mustParse(t, "V=DMARC1; P=Reject; SP=QUARANTINE; NP=Reject; PSD=N; T=Y; ADKIM=S; Aspf=S; FO=D:S; RUF=mailto:Fail@Example.test; RUA=MailTo:Agg@Example.test!10M")
 	want := Record{
-		Policy: "reject", SubdomainPolicy: "quarantine", ADKIM: AlignmentStrict, ASPF: AlignmentStrict, Pct: 10,
-		FailureOptions: []string{"d", "s"}, ReportFormats: []string{"afrf"}, ReportInterval: 3600,
-		RUA: []ReportURI{{URI: "MailTo:Agg@Example.test", MaxSize: 10 << 20}},
-		RUF: []ReportURI{{URI: "mailto:Fail@Example.test", MaxSize: math.MaxUint64}},
+		Policy: "reject", SubdomainPolicy: "quarantine", NonExistentPolicy: "reject", PSD: "n", Testing: true,
+		ADKIM: AlignmentStrict, ASPF: AlignmentStrict, FailureOptions: []string{"d", "s"},
+		RUA: []string{"MailTo:Agg@Example.test"},
+		RUF: []string{"mailto:Fail@Example.test"},
 	}
 	if !reflect.DeepEqual(r, want) {
 		t.Errorf("got %+v\nwant %+v", r, want)
@@ -173,38 +196,44 @@ func TestParseRecordAlignmentModes(t *testing.T) {
 	}
 }
 
-// TestParseRecordPct checks pct=: one to three digits up to 100, or the
-// default of 100.
+// TestParseRecordPSD checks psd=: y, n or the default u, an invalid or
+// repeated value taking the default.
 //
-// checklist: DMARC-REC-11 DMARC-REC-07
-func TestParseRecordPct(t *testing.T) {
-	cases := []struct {
-		value string
-		want  int
-	}{
-		{"25", 25}, {"0", 0}, {"100", 100}, {" 50 ", 50}, {"050", 50}, {"007", 7},
-		{"101", 100}, {"200", 100}, {"-1", 100}, {"+5", 100}, {"fifty", 100}, {"", 100}, {"0050", 100}, {"5.5", 100},
+// checklist: DMARC-REC-20 DMARC-REC-07
+func TestParseRecordPSD(t *testing.T) {
+	for value, want := range map[string]string{"y": "y", "n": "n", "u": "u", "Y": "y", " n ": "n", "": "u", "yes": "u", "x": "u"} {
+		if got := mustParse(t, "v=DMARC1; p=none; psd="+value).PSD; got != want {
+			t.Errorf("psd=%q: PSD = %q, want %q", value, got, want)
+		}
 	}
-	for _, c := range cases {
-		rec := "v=DMARC1; p=reject; pct=" + c.value
-		if got := mustParse(t, rec).Pct; got != c.want {
-			t.Errorf("ParseRecord(%q).Pct = %d, want %d", rec, got, c.want)
+	if got := mustParse(t, "v=DMARC1; p=none; psd=y; psd=y").PSD; got != "u" {
+		t.Errorf("a repeated psd= reads as %q, want the default u", got)
+	}
+}
+
+// TestParseRecordTestMode checks t=: y asks for test mode, and n, the
+// default, and anything else do not.
+//
+// checklist: DMARC-REC-21 DMARC-REC-07
+func TestParseRecordTestMode(t *testing.T) {
+	for value, want := range map[string]bool{"y": true, "Y": true, " y ": true, "n": false, "": false, "yes": false, "1": false} {
+		if got := mustParse(t, "v=DMARC1; p=reject; t="+value).Testing; got != want {
+			t.Errorf("t=%q: Testing = %v, want %v", value, got, want)
 		}
 	}
 }
 
 // TestParseRecordInvalidTagsDefault checks that a syntax error in an optional
 // tag takes its default and leaves the rest of the record, and the policy,
-// alone. (v0.3.0 refused such a record; a typo in pct= then switched a
-// domain's reject policy off.)
+// alone. (v0.3.0 refused such a record; a typo in an optional tag then
+// switched a domain's reject policy off.)
 //
 // checklist: DMARC-REC-07
 func TestParseRecordInvalidTagsDefault(t *testing.T) {
-	got := mustParse(t, "v=DMARC1; p=reject; adkim=x; aspf=; pct=150; fo=2; rf=xml; ri=-5; ruf=mailto:f@example.test")
+	got := mustParse(t, "v=DMARC1; p=reject; adkim=x; aspf=; psd=maybe; t=sometimes; fo=2; ruf=mailto:f@example.test")
 	want := Record{
-		Policy: "reject", ADKIM: AlignmentRelaxed, ASPF: AlignmentRelaxed, Pct: 100,
-		FailureOptions: []string{"0"}, ReportFormats: []string{"afrf"}, ReportInterval: 86400,
-		RUF: []ReportURI{{URI: "mailto:f@example.test", MaxSize: math.MaxUint64}},
+		Policy: "reject", PSD: "u", ADKIM: AlignmentRelaxed, ASPF: AlignmentRelaxed,
+		FailureOptions: []string{"0"}, RUF: []string{"mailto:f@example.test"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("got %+v\nwant %+v", got, want)
@@ -217,17 +246,18 @@ func TestParseRecordInvalidTagsDefault(t *testing.T) {
 //
 // checklist: DMARC-REC-18
 func TestParseRecordDuplicateTags(t *testing.T) {
-	r := mustParse(t, "v=DMARC1; p=reject; pct=10; pct=20; adkim=s; ADKIM=s")
-	if r.Pct != 100 || r.ADKIM != AlignmentRelaxed || r.Policy != "reject" {
-		t.Errorf("got %+v, want pct 100, adkim relaxed, p reject", r)
+	r := mustParse(t, "v=DMARC1; p=reject; t=y; t=y; adkim=s; ADKIM=s")
+	if r.Testing || r.ADKIM != AlignmentRelaxed || r.Policy != "reject" {
+		t.Errorf("got %+v, want no test mode, adkim relaxed, p reject", r)
 	}
 	if _, err := ParseRecord("v=DMARC1; p=reject; P=reject"); !errors.Is(err, ErrNoPolicy) {
 		t.Errorf("a repeated p= must leave no policy, got %v", err)
 	}
 }
 
-// TestParseRecordFailureOptions checks fo=: a colon-separated list of 0, 1, d
-// and s, "0" by default, and ignored when the record has no ruf=.
+// TestParseRecordFailureOptions checks fo=: "0" or "1", which exclude each
+// other, and "d" and "s", each at most once, "0" by default, and ignored
+// when the record has no ruf=.
 //
 // checklist: DMARC-REC-12 DMARC-REC-13 DMARC-REC-07
 func TestParseRecordFailureOptions(t *testing.T) {
@@ -238,8 +268,13 @@ func TestParseRecordFailureOptions(t *testing.T) {
 	}{
 		{"v=DMARC1; p=none" + ruf, []string{"0"}},
 		{"v=DMARC1; p=none; fo=1" + ruf, []string{"1"}},
-		{"v=DMARC1; p=none; fo=0:1:d:s" + ruf, []string{"0", "1", "d", "s"}},
+		{"v=DMARC1; p=none; fo=0:d:s" + ruf, []string{"0", "d", "s"}},
+		{"v=DMARC1; p=none; fo=d:1:s" + ruf, []string{"d", "1", "s"}},
 		{"v=DMARC1; p=none; fo= d : s " + ruf, []string{"d", "s"}},
+		{"v=DMARC1; p=none; fo=0:1" + ruf, []string{"0"}},
+		{"v=DMARC1; p=none; fo=1:0:d" + ruf, []string{"0"}},
+		{"v=DMARC1; p=none; fo=d:d" + ruf, []string{"0"}},
+		{"v=DMARC1; p=none; fo=1:s:s" + ruf, []string{"0"}},
 		{"v=DMARC1; p=none; fo=1:x" + ruf, []string{"0"}},
 		{"v=DMARC1; p=none; fo=" + ruf, []string{"0"}},
 		{"v=DMARC1; p=none; fo=1", []string{"0"}},
@@ -252,71 +287,35 @@ func TestParseRecordFailureOptions(t *testing.T) {
 	}
 }
 
-// TestParseRecordReportFormats checks rf=: only the registered afrf format is
-// kept, and the default is afrf.
-//
-// checklist: DMARC-REC-14
-func TestParseRecordReportFormats(t *testing.T) {
-	for _, v := range []string{"afrf", "AFRF", "iodef:afrf", "iodef", "", "afrf:afrf"} {
-		got := mustParse(t, "v=DMARC1; p=none; rf="+v).ReportFormats
-		want := []string{"afrf"}
-		if v == "afrf:afrf" {
-			want = []string{"afrf", "afrf"}
-		}
-		if !reflect.DeepEqual(got, want) {
-			t.Errorf("rf=%s: ReportFormats = %q, want %q", v, got, want)
-		}
-	}
-}
-
-// TestParseRecordReportInterval checks ri=: an unsigned 32-bit number of
-// seconds, 86400 by default.
-//
-// checklist: DMARC-REC-16 DMARC-REC-07
-func TestParseRecordReportInterval(t *testing.T) {
-	cases := []struct {
-		value string
-		want  uint32
-	}{{"3600", 3600}, {"0", 0}, {"4294967295", 4294967295}, {"4294967296", 86400}, {"-1", 86400}, {"1h", 86400}, {"", 86400}}
-	for _, c := range cases {
-		if got := mustParse(t, "v=DMARC1; p=none; ri="+c.value).ReportInterval; got != c.want {
-			t.Errorf("ri=%s: ReportInterval = %d, want %d", c.value, got, c.want)
-		}
-	}
-}
-
 // TestParseReportURIs checks rua= and ruf=: comma-separated URIs in order,
-// each with an optional "!" size limit in powers of two, invalid ones left
-// out.
+// the obsolete "!" size limit checked for its syntax and dropped, and invalid
+// URIs left out.
 //
-// checklist: DMARC-URI-01 DMARC-URI-02 DMARC-URI-03 DMARC-URI-04 DMARC-URI-05
+// checklist: DMARC-URI-01 DMARC-URI-02 DMARC-URI-04 DMARC-URI-05
 func TestParseReportURIs(t *testing.T) {
-	const max = math.MaxUint64
 	cases := []struct {
 		value string
-		want  []ReportURI
+		want  []string
 	}{
-		{"mailto:a@example.test", []ReportURI{{"mailto:a@example.test", max}}},
+		{"mailto:a@example.test", []string{"mailto:a@example.test"}},
 		{"mailto:a@example.test,mailto:b@example.test, mailto:c@example.test ,https://r.example.test/x",
-			[]ReportURI{{"mailto:a@example.test", max}, {"mailto:b@example.test", max}, {"mailto:c@example.test", max}, {"https://r.example.test/x", max}}},
-		{"mailto:a@example.test!100", []ReportURI{{"mailto:a@example.test", 100}}},
-		{"mailto:a@example.test!10k", []ReportURI{{"mailto:a@example.test", 10 << 10}}},
-		{"mailto:a@example.test!50m", []ReportURI{{"mailto:a@example.test", 50 << 20}}},
-		{"mailto:a@example.test!2g", []ReportURI{{"mailto:a@example.test", 2 << 30}}},
-		{"mailto:a@example.test!1T", []ReportURI{{"mailto:a@example.test", 1 << 40}}},
-		{"mailto:a@example.test!0", []ReportURI{{"mailto:a@example.test", 0}}},
-		{"mailto:a@example.test!18446744073709551615", []ReportURI{{"mailto:a@example.test", max}}},
-		{"mailto:a@example.test!18446744073709551615k", []ReportURI{{"mailto:a@example.test", max}}},
-		// A size that does not fit in 64 bits, or is not a number, makes the
-		// URI invalid, and so does an unencoded "!" in it.
-		{"mailto:a@example.test!18446744073709551616", nil},
+			[]string{"mailto:a@example.test", "mailto:b@example.test", "mailto:c@example.test", "https://r.example.test/x"}},
+		// The obsolete size limit is dropped, whatever its size.
+		{"mailto:a@example.test!100", []string{"mailto:a@example.test"}},
+		{"mailto:a@example.test!10k", []string{"mailto:a@example.test"}},
+		{"mailto:a@example.test!50m,mailto:b@example.test!2G", []string{"mailto:a@example.test", "mailto:b@example.test"}},
+		{"mailto:a@example.test!1T", []string{"mailto:a@example.test"}},
+		{"mailto:a@example.test!0", []string{"mailto:a@example.test"}},
+		{"mailto:a@example.test!18446744073709551616", []string{"mailto:a@example.test"}},
+		// A "!" not followed by a size makes the URI invalid, and so does an
+		// unencoded "!" in it.
 		{"mailto:a@example.test!", nil},
 		{"mailto:a@example.test!10x", nil},
 		{"mailto:a@example.test!k", nil},
 		{"mailto:a!b@example.test!10", nil},
 		// An encoded comma or "!" belongs to the URI.
 		{"mailto:a%2Cb@example.test,mailto:c%21d@example.test!1k",
-			[]ReportURI{{"mailto:a%2Cb@example.test", max}, {"mailto:c%21d@example.test", 1 << 10}}},
+			[]string{"mailto:a%2Cb@example.test", "mailto:c%21d@example.test"}},
 		// Not URIs: no scheme, nothing after it, whitespace or control
 		// characters inside, a bad scheme.
 		{"a@example.test,mailto:,mailto:a b@example.test,mailto:a\x00@example.test,1x:a@example.test,,", nil},
@@ -334,7 +333,7 @@ func TestParseReportURIs(t *testing.T) {
 // discarded, several DMARC records are no policy, NXDOMAIN is no policy, and a
 // transient DNS error is an error.
 //
-// checklist: DMARC-DISC-03 DMARC-DISC-05 DMARC-DISC-08 DMARC-DISC-09 DMARC-REC-02 DMARC-REC-03
+// checklist: DMARC-DISC-03 DMARC-DISC-08 DMARC-DISC-09 DMARC-REC-02 DMARC-REC-03
 func TestLookup(t *testing.T) {
 	t.Run("found", func(t *testing.T) {
 		resolver := func(name string) ([]string, error) {
@@ -363,10 +362,10 @@ func TestLookup(t *testing.T) {
 		}
 	})
 
-	// Issue #12: RFC 7489 §6.6.3 step 5 — if more than one record at the name
-	// begins with v=DMARC1, the set is ambiguous and discarded, so the domain is
-	// treated as publishing no usable policy. Returning the first record would
-	// make the applied policy depend on non-deterministic DNS ordering.
+	// Issue #12: RFC 9989 §4.10 step 2 — if more than one record at the name
+	// begins with v=DMARC1, they are all discarded, so the name publishes no
+	// usable policy. Returning the first record would make the applied policy
+	// depend on non-deterministic DNS ordering.
 	t.Run("multiple DMARC records are discarded (no policy)", func(t *testing.T) {
 		resolver := func(string) ([]string, error) {
 			return []string{"v=DMARC1; p=none", "v=DMARC1; p=reject"}, nil
@@ -405,7 +404,7 @@ func TestLookup(t *testing.T) {
 
 	// Issue #8: net.LookupTXT returns a *net.DNSError with IsNotFound for a name
 	// that does not exist, which is the common case for a domain that simply
-	// publishes no DMARC record. That is "no policy" (RFC 7489 §6.6.3), not a
+	// publishes no DMARC record. That is "no policy" (RFC 9989 §4.10.1), not a
 	// lookup failure, and must map to the documented ("", nil).
 	t.Run("NXDOMAIN is no-record, not an error", func(t *testing.T) {
 		resolver := func(string) ([]string, error) {
@@ -436,9 +435,9 @@ func TestLookup(t *testing.T) {
 	})
 
 	// Issue #13: the v=DMARC1 version tag must match as a complete token per
-	// RFC 7489 §6.3 (v is the first tag and its value is exactly "DMARC1") and
-	// the §6.4 ABNF (dmarc-version = "v" *WSP "=" *WSP %x44 %x4d %x41 %x52 %x43
-	// %x31). The value is case-sensitive: §6.3 says it "MUST match precisely".
+	// RFC 9989 §4.7 (v is the first tag and its value is exactly "DMARC1") and
+	// the §4.8 ABNF (dmarc-version = "v" equals %s"DMARC1"). The value is
+	// case-sensitive: §4.7 says "The tag value is case sensitive".
 	t.Run("version tag matches DMARC1 exactly", func(t *testing.T) {
 		cases := []struct {
 			name   string
@@ -496,7 +495,10 @@ func TestNilResolverUsesSystemDNS(t *testing.T) {
 	var queried []string
 	systemResolver = func(name string) ([]string, error) {
 		queried = append(queried, name)
-		return []string{"v=DMARC1; p=reject"}, nil
+		if name == "_dmarc.example.test" || name == "example.test._report._dmarc.other.test" {
+			return []string{"v=DMARC1; p=reject"}, nil
+		}
+		return nil, nil
 	}
 	if rec, err := Lookup("example.test", nil); err != nil || rec != "v=DMARC1; p=reject" {
 		t.Errorf("Lookup = %q, %v", rec, err)
@@ -504,10 +506,15 @@ func TestNilResolverUsesSystemDNS(t *testing.T) {
 	if p, err := Discover("example.test", nil, nil); err != nil || p.Requested != "reject" {
 		t.Errorf("Discover = %+v, %v", p, err)
 	}
-	if got, err := AuthorizeReportURIs("example.test", "rua", uris("mailto:a@other.test"), nil, nil); err != nil || len(got) != 1 {
+	if got, err := AuthorizeReportURIs("example.test", "rua", []string{"mailto:a@other.test"}, nil); err != nil || len(got) != 1 {
 		t.Errorf("AuthorizeReportURIs = %+v, %v", got, err)
 	}
-	want := []string{"_dmarc.example.test", "_dmarc.example.test", "example.test._report._dmarc.other.test"}
+	// Lookup and Discover each ask once; the destination check walks the tree
+	// for both domains, which have different Organizational Domains, and then
+	// asks the destination.
+	want := []string{"_dmarc.example.test", "_dmarc.example.test",
+		"_dmarc.example.test", "_dmarc.test", "_dmarc.other.test", "_dmarc.test",
+		"example.test._report._dmarc.other.test"}
 	if !reflect.DeepEqual(queried, want) {
 		t.Errorf("queried %q, want %q", queried, want)
 	}

@@ -19,7 +19,7 @@ import (
 // without separators, while different RRs must remain separate candidates.
 //
 // checklist: DMARC-REC-01
-func TestRFC7489TXTCharacterStrings(t *testing.T) {
+func TestRFC9989TXTCharacterStrings(t *testing.T) {
 	const record = "v=DMARC1; p=reject; rua=mailto:reports@example.test"
 	cases := []struct {
 		name    string
@@ -55,7 +55,7 @@ func TestRFC7489TXTCharacterStrings(t *testing.T) {
 			"_dmarc.example.test.":      {{"v=DMARC1; p=none; s", "p=quaran", "tine"}},
 		})
 		policy, err := Discover("mail.example.test", nil, nil)
-		if err != nil || policy.Requested != "quarantine" || !policy.ViaOrgDomain || policy.Domain != "example.test" {
+		if err != nil || policy.Requested != "quarantine" || !policy.Inherited || policy.Domain != "example.test" {
 			t.Fatalf("Discover = %+v, %v; want organizational quarantine policy", policy, err)
 		}
 	})
@@ -64,9 +64,9 @@ func TestRFC7489TXTCharacterStrings(t *testing.T) {
 		useWireTXTResolver(t, map[string][][]string{
 			"example.test._report._dmarc.other.test.": {{"v=DM", "ARC1; rua=mailto:over", "ride@other.test!2", "k"}},
 		})
-		got, err := AuthorizeReportURIs("example.test", "rua", uris("mailto:original@other.test"), nil, nil)
-		if err != nil || len(got) != 1 || got[0].URI != "mailto:override@other.test" || got[0].MaxSize != 2048 {
-			t.Fatalf("AuthorizeReportURIs = %+v, %v; want joined override with 2048-byte limit", got, err)
+		got, err := AuthorizeReportURIs("example.test", "rua", uris("mailto:original@other.test"), nil)
+		if err != nil || len(got) != 1 || got[0] != "mailto:override@other.test" {
+			t.Fatalf("AuthorizeReportURIs = %+v, %v; want the joined override, its size limit dropped", got, err)
 		}
 	})
 

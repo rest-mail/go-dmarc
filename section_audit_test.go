@@ -71,12 +71,13 @@ func TestAggregateAttachmentXML(t *testing.T) {
 	}
 }
 
-// TestBuildReportSamplingKeepsAllMessages checks §6.6.4 at the serialized
-// reporting boundary: pct limits enforcement, never the records reported.
-// Both duplicated messages and different dispositions/authentication outcomes
-// must survive, including when pct=0.
+// TestBuildReportSamplingKeepsAllMessages checks at the serialized reporting
+// boundary that every message is reported, whatever policy_published says:
+// duplicated messages and different dispositions and authentication outcomes
+// all survive, including messages an RFC 7489 receiver sampled out and a
+// policy_published pct of 0.
 //
-// checklist: DMARC-POL-07
+// checklist: DMARC-AGG-05
 func TestBuildReportSamplingKeepsAllMessages(t *testing.T) {
 	records := []AggregateRecord{
 		{Domain: "example.com", SourceIP: "192.0.2.1", Disposition: "none",
