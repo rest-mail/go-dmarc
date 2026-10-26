@@ -19,12 +19,12 @@ jobs:
     uses: rest-mail/go-spf/.github/workflows/rfc-verification.yml@7d291c08d310b9c62afc287e75a534a39150fafb
     with:
       packages: '["./..."]'
-      checklist-dirs: '["."]'
+      checklist-dirs: '["./pkg/dmarc"]'
       fuzz-targets: >-
-        [{"package":".","target":"FuzzParseRecord"},
-         {"package":".","target":"FuzzAlignment"},
-         {"package":".","target":"FuzzDiscover"},
-         {"package":".","target":"FuzzBuildReport"}]
+        [{"package":"./pkg/dmarc","target":"FuzzParseRecord"},
+         {"package":"./pkg/dmarc","target":"FuzzAlignment"},
+         {"package":"./pkg/dmarc","target":"FuzzDiscover"},
+         {"package":"./pkg/dmarc","target":"FuzzBuildReport"}]
 
   fixtures:
     name: Workflow fixtures

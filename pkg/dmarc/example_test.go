@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"fmt"
 
-	"github.com/rest-mail/go-dmarc"
+	"github.com/rest-mail/go-dmarc/pkg/dmarc"
 )
 
 // Example parses a published DMARC record and decides the disposition for one
