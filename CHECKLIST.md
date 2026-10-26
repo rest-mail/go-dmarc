@@ -15,7 +15,7 @@ are named.
 
 An item that does not apply to a library (because it is the receiver's
 policy, or the library sends no mail, say) says "n/a" and why. CI checks this
-file against the tests with `go run ./internal/checklist`; the format is
+file against the tests with `go run ./internal/checklist pkg/dmarc`; the format is
 described in the [README](README.md#the-rfc-checklist).
 
 ## Which RFC: DMARCbis, not RFC 7489
@@ -60,7 +60,7 @@ unsupported by owner decision; this audit adds no such feature.
 | 6 | Feedback is RFC 9990's; see its audit below. |
 | 7.1–7.6 | Other topics; §7.4's receiver obligations are POL-14 and POL-15. |
 | 8–11 | Minimum implementations (Domain Owner side), privacy, IANA and security considerations; no further receiver obligations a library can meet. |
-| A–C | Design notes, examples and changes; Appendix B's examples are tests (`rfc_test.go`), Appendix A.6's test mode is DMARC-REC-21. |
+| A–C | Design notes, examples and changes; Appendix B's examples are tests (`pkg/dmarc/rfc_test.go`), Appendix A.6's test mode is DMARC-REC-21. |
 
 Reviewed RFC 9990 §§1–9 and Appendices A–C the same way, for obligations on
 a report generator:
@@ -74,7 +74,7 @@ a report generator:
 | 3.5, 3.5.1–3.5.4 | Delivery: AGG-08, -09, -11 to -15, -18, -19, -24. |
 | 4 | External destinations: EXT rows. |
 | 6–9 | IANA, privacy, security and operational considerations; §7.3's limit on PSD feedback concerns failure reports, which the library does not generate. |
-| A–C | The schema (`schema_test.go` encodes it), the sample report and the differences from RFC 7489. |
+| A–C | The schema (`pkg/dmarc/schema_test.go` encodes it), the sample report and the differences from RFC 7489. |
 
 ## Records (§4.5, §4.7, §4.8)
 
