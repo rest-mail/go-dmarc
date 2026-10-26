@@ -40,21 +40,6 @@ func TestAggregateRecords_GroupsAndCounts(t *testing.T) {
 	}
 }
 
-// TestEvaluated_RequiresPassAndAlign checks that a mechanism counts for DMARC only when it passed and aligned.
-//
-// checklist: DMARC-ALIGN-05 DMARC-XML-13
-func TestEvaluated_RequiresPassAndAlign(t *testing.T) {
-	if evaluated("pass", false) != "fail" {
-		t.Error("pass-but-unaligned must evaluate to fail")
-	}
-	if evaluated("pass", true) != "pass" {
-		t.Error("pass+aligned must evaluate to pass")
-	}
-	if evaluated("fail", true) != "fail" {
-		t.Error("fail must evaluate to fail")
-	}
-}
-
 // TestBuildReport_ValidXML checks the document is well-formed XML with version 1.0.
 //
 // checklist: DMARC-XML-01

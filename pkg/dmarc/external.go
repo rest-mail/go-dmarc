@@ -3,6 +3,9 @@ package dmarc
 import (
 	"net/url"
 	"strings"
+
+	"github.com/rest-mail/go-dmarc/pkg/dmarc/internal/dnsname"
+	"github.com/rest-mail/go-dmarc/pkg/dmarc/internal/recordgrammar"
 )
 
 // AuthorizeReportURIs returns the report URIs a reporter may send to, after
@@ -25,7 +28,7 @@ import (
 // checked so far, so the caller can try again later (§4 step 5). A nil
 // resolver uses net.LookupTXT.
 func AuthorizeReportURIs(policyDomain, tag string, uris []string, resolver TXTResolver) ([]string, error) {
-	policyDomain, ok := queryDomain(policyDomain)
+	policyDomain, ok := dnsname.QueryDomain(policyDomain)
 	if !ok || len(uris) == 0 {
 		return nil, nil
 	}
@@ -47,7 +50,7 @@ func AuthorizeReportURIs(policyDomain, tag string, uris []string, resolver TXTRe
 			out = append(out, u)
 			continue
 		}
-		name, ok := queryDomain(policyDomain + "._report._dmarc." + host)
+		name, ok := dnsname.QueryDomain(policyDomain + "._report._dmarc." + host)
 		if !ok {
 			continue // §4 step 4: the name exceeds DNS limits, so nothing can confirm it
 		}
@@ -86,7 +89,7 @@ func overrideURIs(records []string, tag string) []string {
 		for _, part := range strings.Split(rec, ";")[1:] {
 			name, value, found := strings.Cut(part, "=")
 			if found && strings.EqualFold(strings.TrimSpace(name), tag) {
-				return append([]string{}, parseReportURIs(strings.TrimSpace(value))...)
+				return append([]string{}, recordgrammar.ParseReportURIs(strings.TrimSpace(value))...)
 			}
 		}
 	}
@@ -113,5 +116,5 @@ func reportURIHost(uri string) (string, bool) {
 		}
 		host = addr[at+1:]
 	}
-	return queryDomain(host)
+	return dnsname.QueryDomain(host)
 }

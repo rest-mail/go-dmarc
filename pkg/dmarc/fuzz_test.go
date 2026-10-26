@@ -7,6 +7,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/rest-mail/go-dmarc/pkg/dmarc/internal/dnsname"
+	"github.com/rest-mail/go-dmarc/pkg/dmarc/internal/recordgrammar"
+	"github.com/rest-mail/go-dmarc/pkg/dmarc/internal/reportcodec"
+
 	msgauth "github.com/emersion/go-msgauth/dmarc"
 	"golang.org/x/net/idna"
 )
@@ -37,12 +41,12 @@ func FuzzParseRecord(f *testing.F) {
 			if err != ErrNotDMARC && err != ErrNoPolicy {
 				t.Fatalf("unexpected error %v", err)
 			}
-			if (err == ErrNotDMARC) == hasDMARCVersion(txt) {
-				t.Fatalf("error %v for a record whose version tag is %v", err, hasDMARCVersion(txt))
+			if (err == ErrNotDMARC) == recordgrammar.HasDMARCVersion(txt) {
+				t.Fatalf("error %v for a record whose version tag is %v", err, recordgrammar.HasDMARCVersion(txt))
 			}
 			return
 		}
-		if !hasDMARCVersion(txt) {
+		if !recordgrammar.HasDMARCVersion(txt) {
 			t.Fatalf("accepted a record without v=DMARC1 first")
 		}
 		if !slices.Contains([]string{"none", "quarantine", "reject"}, r.Policy) ||
@@ -62,7 +66,7 @@ func FuzzParseRecord(f *testing.F) {
 			t.Fatalf("fo %q has both 0 and 1", r.FailureOptions)
 		}
 		for _, u := range append(slices.Clone(r.RUA), r.RUF...) {
-			again, ok := parseReportURI(u)
+			again, ok := recordgrammar.ParseReportURI(u)
 			if !ok || again != u {
 				t.Fatalf("URI %q does not parse again: %q, %v", u, again, ok)
 			}
@@ -82,7 +86,7 @@ func FuzzParseRecord(f *testing.F) {
 // 7489) does not know and an invalid value of which leaves this parser's
 // record without a policy: the records on which the two must agree.
 func plainTags(txt string) bool {
-	if !hasDMARCVersion(txt) {
+	if !recordgrammar.HasDMARCVersion(txt) {
 		return false
 	}
 	seen := map[string]bool{}
@@ -144,24 +148,24 @@ func FuzzAlignment(f *testing.F) {
 		if queries > 5*16 {
 			t.Fatalf("five alignments sent %d queries", queries)
 		}
-		d, ok := queryDomain(a)
+		d, ok := dnsname.QueryDomain(a)
 		if align(a, a, AlignmentRelaxed) != ok {
-			t.Fatalf("AlignedMode(%q, %q) = %v, but queryDomain says %v", a, a, !ok, ok)
+			t.Fatalf("AlignedMode(%q, %q) = %v, but dnsname.QueryDomain says %v", a, a, !ok, ok)
 		}
 		if !ok {
 			return
 		}
-		if again, ok := queryDomain(d); !ok || again != d {
+		if again, ok := dnsname.QueryDomain(d); !ok || again != d {
 			t.Fatalf("normalizing %q is not idempotent: %q then %q", a, d, again)
 		}
 		// Compare the punycode of each label with x/net/idna's, where it
 		// accepts the lower-cased label.
 		for _, label := range strings.Split(strings.ToLower(strings.TrimSuffix(a, ".")), ".") {
 			want, err := idna.Punycode.ToASCII(label)
-			if err != nil || isASCII(label) {
+			if err != nil || !strings.ContainsFunc(label, func(r rune) bool { return r >= 0x80 }) {
 				continue
 			}
-			if got := labelToASCII(label); got != want {
+			if got := dnsname.NormalizeDomain(label); got != want {
 				t.Fatalf("label %q: %q, x/net/idna %q", label, got, want)
 			}
 		}
@@ -187,10 +191,10 @@ func FuzzDiscover(f *testing.F) {
 		resolver := func(name string) ([]string, error) {
 			queries++
 			rest, ok := strings.CutPrefix(name, "_dmarc.")
-			if _, valid := queryDomain(rest); !ok || !valid || rest != normalizeDomain(rest) {
+			if _, valid := dnsname.QueryDomain(rest); !ok || !valid || rest != dnsname.NormalizeDomain(rest) {
 				t.Fatalf("queried %q", name)
 			}
-			if d, _ := queryDomain(domain); rest == d {
+			if d, _ := dnsname.QueryDomain(domain); rest == d {
 				return []string{exact}, nil
 			}
 			return []string{org}, nil
@@ -241,7 +245,7 @@ func FuzzBuildReport(f *testing.F) {
 		policy := PolicyPublished{Domain: domain, DiscoveryMethod: reason, ADKIM: adkim, ASPF: adkim, P: disposition, SP: disposition, NP: fo, FO: fo, Testing: mode}
 		out, err := BuildReport(ReportMetadata{OrgName: domain, Email: selector, ReportID: reason, Error: dkimResult, Generator: mode}, policy, recs)
 		if err != nil {
-			if _, ok := reportIP(ip); ok {
+			if _, ok := reportcodec.ReportIP(ip); ok {
 				t.Fatalf("BuildReport failed for a valid IP: %v", err)
 			}
 			return

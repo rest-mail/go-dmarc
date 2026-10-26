@@ -1,6 +1,11 @@
 package dmarc
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/rest-mail/go-dmarc/pkg/dmarc/internal/dnsname"
+	"github.com/rest-mail/go-dmarc/pkg/dmarc/internal/recordgrammar"
+)
 
 // Policy is the result of DMARC policy discovery (RFC 9989 §4.10.1) for an
 // Author Domain. A Policy with an empty Raw record (and "none" Requested)
@@ -63,7 +68,7 @@ type ExistsFunc func(domain string) (bool, error)
 // an empty Raw record and a nil error.
 func Discover(domain string, resolver TXTResolver, exists ExistsFunc) (Policy, error) {
 	none := Policy{Requested: "none", Applied: "none"}
-	domain, ok := queryDomain(domain)
+	domain, ok := dnsname.QueryDomain(domain)
 	if !ok {
 		return none, nil
 	}
@@ -150,7 +155,7 @@ func newPolicy(domain, raw string, rec Record, requested string, inherited, psd 
 // is not a valid DNS name. resolver may be nil, for system DNS; its errors
 // are returned.
 func OrgDomain(domain string, resolver TXTResolver) (string, error) {
-	domain, ok := queryDomain(domain)
+	domain, ok := dnsname.QueryDomain(domain)
 	if !ok {
 		return "", nil
 	}
@@ -247,6 +252,6 @@ func oneLabelBelow(subject, ancestor string) string {
 // whether or not the record has a valid policy: the Tree Walk stops on it
 // and the Organizational Domain depends on it either way.
 func recordPSD(raw string) string {
-	tags, _, _ := recordTags(raw) // nil, and so "u", for a record that is not DMARC
-	return psdTag(tags)
+	tags, _, _ := recordgrammar.RecordTags(raw) // nil, and so "u", for a record that is not DMARC
+	return recordgrammar.PSDTag(tags)
 }
