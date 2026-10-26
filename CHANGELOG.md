@@ -6,6 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-26
+
+### Changed (breaking)
+
+- The library moves out of the module root into `pkg/dmarc`, the layout the
+  other rest-mail `go-*` libraries use. The module path is unchanged
+  (`github.com/rest-mail/go-dmarc`), but the root package is gone: import
+  `github.com/rest-mail/go-dmarc/pkg/dmarc`. The package is still named
+  `dmarc`, and every exported identifier keeps its name and signature, so
+  only the import path changes.
+
+Every function behaves as it did in v0.5.0.
+
+Migration: replace the import path; the code that uses it does not change.
+
+| Before (v0.5) | After (v0.6) |
+|---------------|--------------|
+| `import "github.com/rest-mail/go-dmarc"` | `import "github.com/rest-mail/go-dmarc/pkg/dmarc"` |
+| `dmarc.Discover`, `dmarc.ParseRecord`, `dmarc.AlignedMode`, `dmarc.BuildReport` and every other identifier | unchanged, now from `.../pkg/dmarc` |
+
+## [0.5.0] - 2026-10-24
+
 go-dmarc follows DMARCbis, which obsoleted RFC 7489 in May 2026
 (rest-mail/rest-mail-server#730): RFC 9989 for the receiver and RFC 9990 for
 aggregate reports. CHECKLIST.md is now an RFC 9989 and RFC 9990 checklist.
