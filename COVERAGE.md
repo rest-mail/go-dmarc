@@ -1,6 +1,8 @@
 # Coverage exceptions
 
-CI fails when statement coverage of `./...` falls below 95%. These are the
+CI fails when statement coverage of `./...` falls below 95%. The pinned RFC
+proof uses `-coverpkg=./...`, so tests in `pkg/dmarc` also cover the internal
+DNS, record grammar and report codec packages they exercise. These are the
 statements left uncovered on purpose, each with the reason. Add an entry here
 whenever you leave a statement uncovered.
 

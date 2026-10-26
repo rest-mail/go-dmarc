@@ -6,10 +6,12 @@ import (
 	"encoding/xml"
 	"errors"
 	"fmt"
-	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/rest-mail/go-dmarc/pkg/dmarc/internal/dnsname"
+	"github.com/rest-mail/go-dmarc/pkg/dmarc/internal/reportcodec"
 )
 
 // Namespace is the XML namespace of an RFC 9990 aggregate report, which its
@@ -223,69 +225,6 @@ type SPFResult struct {
 	Result string `xml:"result"`
 }
 
-// evaluated returns the DMARC-aligned pass/fail: a mechanism only counts as
-// passing DMARC when it both passed AND aligned with the From domain.
-func evaluated(result string, aligned bool) string {
-	if aligned && strings.EqualFold(strings.TrimSpace(result), "pass") {
-		return "pass"
-	}
-	return "fail"
-}
-
-// The RFC 9990 Appendix A result and disposition types are closed
-// enumerations; a value outside the set makes the document fail schema
-// validation. The normalize* helpers lower-case the input and fall back to a
-// safe in-enumeration default (none for results and dispositions) so an
-// unknown or empty value never reaches the emitted XML.
-
-func normalizeDKIMResult(s string) string {
-	switch v := strings.ToLower(strings.TrimSpace(s)); v {
-	case "none", "pass", "fail", "policy", "neutral", "temperror", "permerror":
-		return v
-	default:
-		return "none"
-	}
-}
-
-func normalizeSPFResult(s string) string {
-	switch v := strings.ToLower(strings.TrimSpace(s)); v {
-	case "none", "neutral", "pass", "fail", "softfail", "policy", "temperror", "permerror":
-		return v
-	default:
-		return "none"
-	}
-}
-
-// normalizeAlignment keeps an adkim/aspf value of r or s and takes the
-// default r for anything else, which the schema's AlignmentType does not
-// allow.
-func normalizeAlignment(s string) string {
-	if v := strings.ToLower(strings.TrimSpace(s)); v == "s" {
-		return v
-	}
-	return "r"
-}
-
-// normalizeTesting keeps a testing value of y and takes the default n for
-// anything else (TestingType).
-func normalizeTesting(s string) string {
-	if v := strings.ToLower(strings.TrimSpace(s)); v == "y" {
-		return v
-	}
-	return "n"
-}
-
-// normalizeDiscovery keeps a discovery_method of treewalk or psl and drops
-// anything else (DiscoveryType).
-func normalizeDiscovery(s string) string {
-	switch v := strings.ToLower(strings.TrimSpace(s)); v {
-	case "treewalk", "psl":
-		return v
-	default:
-		return ""
-	}
-}
-
 // normalizeReasons maps each reason's type to the PolicyOverrideType
 // enumeration; an unknown type becomes "other" and keeps its text in the
 // comment, as do RFC 7489's forwarded and sampled_out.
@@ -307,42 +246,6 @@ func normalizeReasons(reasons []PolicyOverrideReason) []PolicyOverrideReason {
 		out = append(out, PolicyOverrideReason{Type: t, Comment: r.Comment})
 	}
 	return out
-}
-
-// reportIP writes a source IP address as RFC 9990 §3.1.1.8 asks, an
-// IPv4address or IPv6address of RFC 3986 §3.2.2: an IPv4 address as a dotted
-// quad (an IPv4-mapped IPv6 address included), and an IPv6 address in its
-// canonical compressed form. It returns false for a string that is not an IP
-// address.
-func reportIP(s string) (string, bool) {
-	ip, err := netip.ParseAddr(strings.TrimSpace(s))
-	if err != nil || ip.Zone() != "" {
-		return s, false
-	}
-	return ip.Unmap().String(), true
-}
-
-// normalizeDisposition keeps an ActionDispositionType value: none, pass (a
-// message that passed DMARC under an enforcing policy), quarantine or
-// reject.
-func normalizeDisposition(s string) string {
-	switch v := strings.ToLower(strings.TrimSpace(s)); v {
-	case "none", "pass", "quarantine", "reject":
-		return v
-	default:
-		return "none"
-	}
-}
-
-// normalizePolicy keeps a DispositionType value (none, quarantine or
-// reject), the policies p, sp and np publish.
-func normalizePolicy(s string) string {
-	switch v := strings.ToLower(strings.TrimSpace(s)); v {
-	case "none", "quarantine", "reject":
-		return v
-	default:
-		return "none"
-	}
 }
 
 // headerFrom resolves the header_from identifier, defaulting to the reported-on
@@ -372,7 +275,7 @@ func envelopeFrom(r AggregateRecord) string {
 // (RFC 9989 §4.4.1). An unsigned message is "fail".
 func dmarcDKIM(sigs []DKIMAuth) string {
 	for _, s := range sigs {
-		if evaluated(s.Result, s.Aligned) == "pass" {
+		if reportcodec.Evaluated(s.Result, s.Aligned) == "pass" {
 			return "pass"
 		}
 	}
@@ -382,7 +285,7 @@ func dmarcDKIM(sigs []DKIMAuth) string {
 // dmarcSPF returns the SPF component of policy_evaluated: "pass" when the
 // MAIL FROM check both passed and aligned with the From domain, else "fail".
 func dmarcSPF(check *SPFAuth) string {
-	if check != nil && evaluated(check.Result, check.Aligned) == "pass" {
+	if check != nil && reportcodec.Evaluated(check.Result, check.Aligned) == "pass" {
 		return "pass"
 	}
 	return "fail"
@@ -400,13 +303,13 @@ func AggregateRecords(records []AggregateRecord) []ReportRecord {
 	counts := map[key]int{}
 	rep := map[key]AggregateRecord{}
 	for _, r := range records {
-		ip, _ := reportIP(r.SourceIP)
+		ip, _ := reportcodec.ReportIP(r.SourceIP)
 		k := key{
 			sourceIP:     ip,
 			headerFrom:   headerFrom(r),
 			envelopeFrom: envelopeFrom(r),
 			envelopeTo:   r.EnvelopeTo,
-			disposition:  normalizeDisposition(r.Disposition),
+			disposition:  reportcodec.NormalizeDisposition(r.Disposition),
 			dkimEval:     dmarcDKIM(r.DKIM),
 			spfEval:      dmarcSPF(r.SPF),
 			auth:         authResultsKey(r.DKIM, r.SPF),
@@ -465,11 +368,11 @@ func authResults(r AggregateRecord, headerFrom string) AuthResults {
 		ar.DKIM = append(ar.DKIM, DKIMResult{
 			Domain:   d.Domain,
 			Selector: d.Selector,
-			Result:   normalizeDKIMResult(d.Result),
+			Result:   reportcodec.NormalizeDKIMResult(d.Result),
 		})
 	}
 	if r.SPF != nil {
-		ar.SPF = &SPFResult{Domain: r.SPF.Domain, Scope: "mfrom", Result: normalizeSPFResult(r.SPF.Result)}
+		ar.SPF = &SPFResult{Domain: r.SPF.Domain, Scope: "mfrom", Result: reportcodec.NormalizeSPFResult(r.SPF.Result)}
 	}
 	return ar
 }
@@ -479,7 +382,7 @@ func authResults(r AggregateRecord, headerFrom string) AuthResults {
 // alignment, 2 for any other that passed, and 3 for one that did not pass.
 func dkimPreference(d DKIMAuth, headerFrom string) int {
 	switch {
-	case normalizeDKIMResult(d.Result) != "pass":
+	case reportcodec.NormalizeDKIMResult(d.Result) != "pass":
 		return 3
 	case !d.Aligned:
 		return 2
@@ -514,7 +417,7 @@ func authResultsKey(dkim []DKIMAuth, spf *SPFAuth) string {
 		b.WriteByte(0)
 		b.WriteString(d.Selector)
 		b.WriteByte(0)
-		b.WriteString(normalizeDKIMResult(d.Result))
+		b.WriteString(reportcodec.NormalizeDKIMResult(d.Result))
 		b.WriteByte(0)
 		if d.Aligned {
 			b.WriteByte('a')
@@ -526,7 +429,7 @@ func authResultsKey(dkim []DKIMAuth, spf *SPFAuth) string {
 		b.WriteString("spf\x00")
 		b.WriteString(spf.Domain)
 		b.WriteByte(0)
-		b.WriteString(normalizeSPFResult(spf.Result))
+		b.WriteString(reportcodec.NormalizeSPFResult(spf.Result))
 		b.WriteByte(0)
 	}
 	return b.String()
@@ -542,23 +445,23 @@ func BuildReport(meta ReportMetadata, policy PolicyPublished, records []Aggregat
 		return nil, errors.New("dmarc: an aggregate report needs at least one record")
 	}
 	for _, r := range records {
-		if _, ok := reportIP(r.SourceIP); !ok {
+		if _, ok := reportcodec.ReportIP(r.SourceIP); !ok {
 			return nil, fmt.Errorf("dmarc: source IP %q is not an IP address", r.SourceIP)
 		}
 	}
-	policy.P = normalizePolicy(policy.P)
+	policy.P = reportcodec.NormalizePolicy(policy.P)
 	if strings.TrimSpace(policy.SP) == "" {
 		policy.SP = policy.P
 	}
-	policy.SP = normalizePolicy(policy.SP)
+	policy.SP = reportcodec.NormalizePolicy(policy.SP)
 	if strings.TrimSpace(policy.NP) == "" {
 		policy.NP = policy.SP
 	}
-	policy.NP = normalizePolicy(policy.NP)
-	policy.ADKIM = normalizeAlignment(policy.ADKIM)
-	policy.ASPF = normalizeAlignment(policy.ASPF)
-	policy.Testing = normalizeTesting(policy.Testing)
-	policy.DiscoveryMethod = normalizeDiscovery(policy.DiscoveryMethod)
+	policy.NP = reportcodec.NormalizePolicy(policy.NP)
+	policy.ADKIM = reportcodec.NormalizeAlignment(policy.ADKIM)
+	policy.ASPF = reportcodec.NormalizeAlignment(policy.ASPF)
+	policy.Testing = reportcodec.NormalizeTesting(policy.Testing)
+	policy.DiscoveryMethod = reportcodec.NormalizeDiscovery(policy.DiscoveryMethod)
 	if policy.FO = strings.TrimSpace(policy.FO); policy.FO == "" {
 		policy.FO = "0"
 	}
@@ -597,9 +500,9 @@ func Gzip(data []byte) ([]byte, error) {
 // always give the same name. It returns false when a domain is not a domain
 // name or uniqueID is not letters and digits.
 func ReportFilename(receiver, policyDomain string, period DateRange, uniqueID string, gzipped bool) (string, bool) {
-	r, ok1 := queryDomain(receiver)
-	p, ok2 := queryDomain(policyDomain)
-	if !ok1 || !ok2 || period.Begin < 0 || period.End < 0 || !alphaNumeric(uniqueID) {
+	r, ok1 := dnsname.QueryDomain(receiver)
+	p, ok2 := dnsname.QueryDomain(policyDomain)
+	if !ok1 || !ok2 || period.Begin < 0 || period.End < 0 || !reportcodec.AlphaNumeric(uniqueID) {
 		return "", false
 	}
 	name := r + "!" + p + "!" + strconv.FormatInt(period.Begin, 10) + "!" + strconv.FormatInt(period.End, 10)
@@ -619,9 +522,9 @@ func ReportFilename(receiver, policyDomain string, period DateRange, uniqueID st
 // §3.5.1 (dot-atom-text, optionally "@" dot-atom-text, optionally in angle
 // brackets).
 func ReportSubject(policyDomain, submitter, reportID string) (string, bool) {
-	p, ok1 := queryDomain(policyDomain)
-	s, ok2 := queryDomain(submitter)
-	if !ok1 || !ok2 || reportID != "" && !reportIDText(reportID) {
+	p, ok1 := dnsname.QueryDomain(policyDomain)
+	s, ok2 := dnsname.QueryDomain(submitter)
+	if !ok1 || !ok2 || reportID != "" && !reportcodec.ReportIDText(reportID) {
 		return "", false
 	}
 	subject := "Report Domain: " + p + " Submitter: " + s
@@ -629,48 +532,4 @@ func ReportSubject(policyDomain, submitter, reportID string) (string, bool) {
 		subject += " Report-ID: " + reportID
 	}
 	return subject, true
-}
-
-// alphaNumeric reports whether s holds only ASCII letters and digits
-// (unique-id = 1*(ALPHA / DIGIT), or empty for none).
-func alphaNumeric(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if !isAlphaNum(s[i]) {
-			return false
-		}
-	}
-	return true
-}
-
-// isAlphaNum reports whether c is an ASCII letter or digit.
-func isAlphaNum(c byte) bool {
-	return c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9'
-}
-
-// reportIDText reports whether s is a ridtxt (RFC 9990 §3.5.1): ridfmt or
-// "<" ridfmt ">", where ridfmt is dot-atom-text ["@" dot-atom-text].
-func reportIDText(s string) bool {
-	if strings.HasPrefix(s, "<") && strings.HasSuffix(s, ">") && len(s) > 1 {
-		s = s[1 : len(s)-1]
-	}
-	local, domain, hasAt := strings.Cut(s, "@")
-	return dotAtomText(local) && (!hasAt || dotAtomText(domain))
-}
-
-// dotAtomText reports whether s is 1*atext *("." 1*atext) (RFC 5322 §3.2.3).
-func dotAtomText(s string) bool {
-	if s == "" {
-		return false
-	}
-	for _, part := range strings.Split(s, ".") {
-		if part == "" {
-			return false
-		}
-		for i := 0; i < len(part); i++ {
-			if c := part[i]; !isAlphaNum(c) && strings.IndexByte("!#$%&'*+-/=?^_`{|}~", c) < 0 {
-				return false
-			}
-		}
-	}
-	return true
 }

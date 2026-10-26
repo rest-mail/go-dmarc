@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-26
+
+### Changed
+
+- Split DNS-name handling and punycode, DMARC record grammar and report URI
+  parsing, and aggregate report codecs into focused internal packages. The
+  public `pkg/dmarc` API is unchanged: all exported names and signatures stay
+  in place.
+- Pin CI's shared RFC proof to go-spf `2409e76ef1e501e0222e6c25a0c7a6202de1051b`,
+  which measures statement coverage across packages with `-coverpkg`, so
+  public API tests also cover the internal helpers they call.
+
 ## [0.6.0] - 2026-10-26
 
 ### Changed (breaking)

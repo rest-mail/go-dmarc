@@ -22,7 +22,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[2]
 CALLER = (ROOT / ".github/workflows/ci.yml").read_text()
-PIN = "7d291c08d310b9c62afc287e75a534a39150fafb"
+PIN = "2409e76ef1e501e0222e6c25a0c7a6202de1051b"
 PRODUCER = "rest-mail/go-spf/.github/workflows/rfc-verification.yml@" + PIN
 
 
@@ -114,7 +114,15 @@ class CallerFixtures(unittest.TestCase):
 
     def test_packages_and_checklist_dirs(self):
         self.assertEqual(quoted_input("packages"), ["./..."])
-        self.assertEqual(quoted_input("checklist-dirs"), ["./pkg/dmarc"])
+        self.assertEqual(
+            quoted_input("checklist-dirs"),
+            [
+                "./pkg/dmarc",
+                "./pkg/dmarc/internal/dnsname",
+                "./pkg/dmarc/internal/recordgrammar",
+                "./pkg/dmarc/internal/reportcodec",
+            ],
+        )
 
     def test_fuzz_targets_are_exactly_the_repository_targets(self):
         targets = folded_input("fuzz-targets")
@@ -229,11 +237,23 @@ class ProducerContractFixtures(unittest.TestCase):
                     "-race",
                     "-count=1",
                     "-covermode=atomic",
+                    "-coverpkg=./...",
                     "-coverprofile=coverage.out",
                     "./...",
                 ),
                 ("tool", "cover", "-func=coverage.out"),
-                ("run", "./internal/checklist", "-file", "CHECKLIST.md", "./pkg/dmarc"),
+                (
+                    "run",
+                    "./internal/checklist",
+                    "-file",
+                    "CHECKLIST.md",
+                    *[
+                        "./pkg/dmarc",
+                        "./pkg/dmarc/internal/dnsname",
+                        "./pkg/dmarc/internal/recordgrammar",
+                        "./pkg/dmarc/internal/reportcodec",
+                    ],
+                ),
                 *[
                     (
                         "test",

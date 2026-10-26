@@ -16,10 +16,10 @@ jobs:
   # are listed, with reasons, in COVERAGE.md.
   rfc:
     name: Verify RFC
-    uses: rest-mail/go-spf/.github/workflows/rfc-verification.yml@7d291c08d310b9c62afc287e75a534a39150fafb
+    uses: rest-mail/go-spf/.github/workflows/rfc-verification.yml@2409e76ef1e501e0222e6c25a0c7a6202de1051b
     with:
       packages: '["./..."]'
-      checklist-dirs: '["./pkg/dmarc"]'
+      checklist-dirs: '["./pkg/dmarc","./pkg/dmarc/internal/dnsname","./pkg/dmarc/internal/recordgrammar","./pkg/dmarc/internal/reportcodec"]'
       fuzz-targets: >-
         [{"package":"./pkg/dmarc","target":"FuzzParseRecord"},
          {"package":"./pkg/dmarc","target":"FuzzAlignment"},

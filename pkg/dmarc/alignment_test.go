@@ -5,7 +5,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
-	"time"
+
+	"github.com/rest-mail/go-dmarc/pkg/dmarc/internal/dnsname"
 )
 
 // alignZone publishes the DMARC records the alignment tests need: one
@@ -204,7 +205,7 @@ func TestOrgDomain(t *testing.T) {
 		if got, err := OrgDomain(c.domain, z.lookup); err != nil || got != c.want {
 			t.Errorf("%s: OrgDomain(%q) = %q, %v; want %q", c.name, c.domain, got, err, c.want)
 		}
-		if z.queried[0] != "_dmarc."+normalizeDomain(c.domain) {
+		if z.queried[0] != "_dmarc."+dnsname.NormalizeDomain(c.domain) {
 			t.Errorf("%s: the walk started at %s, not the domain", c.name, z.queried[0])
 		}
 	}
@@ -305,7 +306,7 @@ func TestAlignedModeDefaultRelaxed(t *testing.T) {
 // checklist: DMARC-ALIGN-01
 func TestAlignedRejectsNonDomains(t *testing.T) {
 	z := alignZone()
-	for _, s := range []string{"..", ".example.com", "a..b", "exa mple.com", "a/b.com", strings.Repeat("a", 64) + ".com", strings.Repeat("a.", 127) + "com"} {
+	for _, s := range []string{"..", ".example.com", "a..b", "exa mple.com", "a/b.com", strings.Repeat("a", 64) + ".com", strings.Repeat("a.", 127) + "com", strings.Repeat("ü", 1<<19) + ".com"} {
 		for _, mode := range []AlignmentMode{AlignmentRelaxed, AlignmentStrict} {
 			if ok, err := AlignedMode(s, s, mode, z.lookup); ok || err != nil {
 				t.Errorf("AlignedMode(%q, %q, %v) = %v, %v; want false", s, s, mode, ok, err)
@@ -320,30 +321,5 @@ func TestAlignedRejectsNonDomains(t *testing.T) {
 	}
 	if AlignmentMode(7).String() != "AlignmentMode(7)" || AlignmentStrict.String() != "strict" || AlignmentRelaxed.String() != "relaxed" {
 		t.Errorf("AlignmentMode.String")
-	}
-}
-
-// TestLongNamesRefusedQuickly checks that a name too long to be a DNS name is
-// refused before it is punycode-encoded, whose time is quadratic in the
-// label's length: a megabyte of Unicode in a From domain once took minutes.
-//
-// checklist: DMARC-DISC-15
-func TestLongNamesRefusedQuickly(t *testing.T) {
-	long := strings.Repeat("ü", 1<<19) + ".com"
-	start := time.Now()
-	if aligned(t, long, long) || mustAlign(t, long, "example.com", AlignmentStrict) {
-		t.Error("an over-long name aligned")
-	}
-	if _, ok := queryDomain(strings.Repeat("ü", 255)); ok {
-		t.Error("a 255-code-point name is a domain")
-	}
-	if got := labelToASCII(strings.Repeat("ü", 64)); got != strings.Repeat("ü", 64) {
-		t.Errorf("a 64-code-point label was encoded to %q", got)
-	}
-	if got := labelToASCII(strings.Repeat("ü", 63)); !strings.HasPrefix(got, "xn--") {
-		t.Errorf("a 63-code-point label encodes to %q", got)
-	}
-	if d := time.Since(start); d > 5*time.Second {
-		t.Errorf("took %v", d)
 	}
 }

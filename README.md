@@ -48,11 +48,13 @@ The module declares go 1.25. go-msgauth and golang.org/x/net appear in
 
 | Import path | What it holds |
 |-------------|---------------|
-| `github.com/rest-mail/go-dmarc/pkg/dmarc` | The whole library. Policy: `Discover`, `Policy`, `ExistsFunc`, `Lookup`, `ParseRecord`, `Record`, `ParsePolicy`, `ErrNotDMARC` and `ErrNoPolicy`. Alignment: `AlignedMode`, `AlignmentMode` and `OrgDomain`. Reports: `AggregateRecord`, `AggregateRecords`, `BuildReport`, `NewPolicyPublished`, `Gzip`, `ReportFilename`, `ReportSubject`, `AuthorizeReportURIs`, `Namespace` and the report's XML types. DNS: `TXTResolver`. |
+| `github.com/rest-mail/go-dmarc/pkg/dmarc` | Public API. Policy: `Discover`, `Policy`, `ExistsFunc`, `Lookup`, `ParseRecord`, `Record`, `ParsePolicy`, `ErrNotDMARC` and `ErrNoPolicy`. Alignment: `AlignedMode`, `AlignmentMode` and `OrgDomain`. Reports: `AggregateRecord`, `AggregateRecords`, `BuildReport`, `NewPolicyPublished`, `Gzip`, `ReportFilename`, `ReportSubject`, `AuthorizeReportURIs`, `Namespace` and the report's XML types. DNS: `TXTResolver`. |
+| `pkg/dmarc/internal/dnsname` | Internal DNS-name validation, A-label normalization and punycode. |
+| `pkg/dmarc/internal/recordgrammar` | Internal tag grammar and report URI parsing. |
+| `pkg/dmarc/internal/reportcodec` | Internal RFC 9990 value normalization and attachment identifier validation. |
 
-Policy evaluation and aggregate reporting share one package: both need the
-same domain handling (A-labels, the Tree Walk, the Organizational Domain), and
-a report row is built from the policy the receiver discovered.
+Policy evaluation and aggregate reporting keep their public API in `pkg/dmarc`.
+They share focused internal helpers; callers use the same names and signatures.
 
 Upgrading from v0.5 or earlier: the root package is gone. Import
 `github.com/rest-mail/go-dmarc/pkg/dmarc` instead; every name is unchanged.
@@ -290,7 +292,7 @@ func TestParseRecordVersion(t *testing.T) {
 - a `Test` or `Fuzz` function names no item (`Example` functions may).
 
 ```sh
-go run ./internal/checklist pkg/dmarc
+go run ./internal/checklist pkg/dmarc pkg/dmarc/internal/dnsname pkg/dmarc/internal/recordgrammar pkg/dmarc/internal/reportcodec
 ```
 
 RFC 9989's own examples are tests: the records of Appendix B.2 (including
@@ -344,15 +346,17 @@ in `internal/checklist` checks it against the checklist and its test mappings,
 and the workflow fixtures check the coverage badge.
 
 CI runs the proof through go-spf's reusable
-[`rfc-verification.yml`](https://github.com/rest-mail/go-spf/blob/7d291c08d310b9c62afc287e75a534a39150fafb/.github/workflows/rfc-verification.yml),
+[`rfc-verification.yml`](https://github.com/rest-mail/go-spf/blob/2409e76ef1e501e0222e6c25a0c7a6202de1051b/.github/workflows/rfc-verification.yml),
 pinned to that commit: build, vet, golangci-lint, race tests with at least 95%
-statement coverage, the checklist, and 30 seconds of each fuzz target. The
-required `Build & Test` check passes only when it and the workflow fixtures in
+statement coverage across packages (`-coverpkg=./...`), the checklist, and
+30 seconds of each fuzz target. The required `Build & Test` check passes only
+when it and the workflow fixtures in
 [`.github/tests`](.github/tests) both succeed. To run the same locally:
 
 ```sh
-go test -race ./...                       # all tests, no network
-go run ./internal/checklist pkg/dmarc     # CHECKLIST.md and the tests agree
+go test -race -coverpkg=./... ./...        # all tests, coverage across packages
+go run ./internal/checklist pkg/dmarc pkg/dmarc/internal/dnsname \
+  pkg/dmarc/internal/recordgrammar pkg/dmarc/internal/reportcodec
 go test -run='^$' -fuzz='^FuzzParseRecord$' -fuzztime=30s ./pkg/dmarc
 python3 -m unittest discover -s .github/tests   # what CI passes the shared proof
 ```
@@ -368,6 +372,12 @@ inputs that once failed are kept there or in `testdata/fuzz`.
 ## Changelog
 
 Recent releases; see [CHANGELOG.md](CHANGELOG.md) for the complete history.
+
+### v0.6.1 (2026-10-26)
+
+DNS names, record grammar and report codecs move into internal packages; the
+public API is unchanged. CI's pinned RFC proof measures coverage across
+packages with `-coverpkg`.
 
 ### v0.6.0 (2026-10-26)
 
