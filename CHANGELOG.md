@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Failure reports (RFC 9991, #43). `FailureReportsFor` decides from a
+  record's `fo=` options (0, 1, d, s) which failure reports a message calls
+  for, and none without `ruf=` or for a `psd=y` record. `FailureReportURIs`
+  returns the `ruf=` destinations that pass the RFC 9990 §4 check, and
+  `ReportMailbox` reads a `mailto:` URI's address. `BuildFailureReport` builds
+  the RFC 5965 `multipart/report` message with the RFC 6591 and RFC 9991
+  fields (`Auth-Failure: dmarc`, `Identity-Alignment`, `DKIM-*`, `SPF-DNS`),
+  the original header (or, on request, the whole message, capped by
+  `MaxOriginalSize`), and redaction hooks, with `RedactLocalParts` for stable
+  local-part tokens (RFC 6590). The library still sends nothing.
+- `DKIMAuth.Identity`, the signature's `i=`, used by failure reports only.
+
 ## [0.6.1] - 2026-10-26
 
 ### Changed

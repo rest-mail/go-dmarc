@@ -52,4 +52,15 @@
 // (RFC 9990 §3.5.2). Before sending to a rua= or ruf= address outside the
 // domain's own Organizational Domain, [AuthorizeReportURIs] checks that the
 // destination agreed to receive the reports (RFC 9990 §4).
+//
+// # Failure reports
+//
+// RFC 9991 failure reports describe single failing messages and can expose
+// personal data, so many receivers send none (RFC 9991 §7). For those that
+// do, [FailureReportsFor] decides from a record's fo= options which reports a
+// message calls for, [FailureReportURIs] returns the ruf= destinations that
+// may receive them, and [BuildFailureReport] builds the RFC 5965 report
+// message with the RFC 9991 fields, the original header (or whole message)
+// and redaction hooks such as [RedactLocalParts]. Sending, and the rate limit
+// RFC 9991 §2 requires, stay with the caller.
 package dmarc

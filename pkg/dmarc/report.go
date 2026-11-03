@@ -79,6 +79,9 @@ type DKIMAuth struct {
 	Selector string // the signature's s= selector, which the report requires
 	Result   string // pass|fail|none|neutral|policy|temperror|permerror
 	Aligned  bool   // whether Domain aligns with the From domain (feeds policy_evaluated)
+	// Identity is the signature's i= tag, used only by failure reports
+	// (DKIM-Identity, RFC 6591 §3.2.3); "" means the default, "@" + Domain.
+	Identity string
 }
 
 // SPFAuth is the SPF authentication result of the MAIL FROM identity as

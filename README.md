@@ -2,14 +2,14 @@
 
 [![CI](https://github.com/rest-mail/go-dmarc/actions/workflows/ci.yml/badge.svg)](https://github.com/rest-mail/go-dmarc/actions/workflows/ci.yml)
 [![Coverage gate: >=95%](https://img.shields.io/badge/coverage%20gate-%3E%3D95%25-brightgreen)](COVERAGE.md)
-[![Checklist: 82/106 mapped](https://img.shields.io/badge/checklist-82%2F106%20mapped-blue)](CHECKLIST.md)
+[![Checklist: 92/117 mapped](https://img.shields.io/badge/checklist-92%2F117%20mapped-blue)](CHECKLIST.md)
 [![Go Reference](https://pkg.go.dev/badge/github.com/rest-mail/go-dmarc.svg)](https://pkg.go.dev/github.com/rest-mail/go-dmarc/pkg/dmarc)
 [![Go Report Card](https://goreportcard.com/badge/github.com/rest-mail/go-dmarc)](https://goreportcard.com/report/github.com/rest-mail/go-dmarc)
 
 The receiver side of DMARC ([RFC 9989]) for Go, from the
 [REST Mail](https://rest-mail.com) project: policy discovery with the DNS Tree
-Walk, record parsing, identifier alignment, and aggregate report generation
-([RFC 9990]). Standard library only: no external dependencies.
+Walk, record parsing, identifier alignment, aggregate report generation
+([RFC 9990]) and failure report generation ([RFC 9991]). Standard library only: no external dependencies.
 
 DMARC lets the owner of a From domain publish, at `_dmarc.<domain>`, how
 receivers should treat mail that is not authenticated as coming from that
@@ -28,7 +28,7 @@ RFC 7489; [CHECKLIST.md](CHECKLIST.md) says what changed.
 
 - [Install](#install)
 - [Packages](#packages)
-- [Quick start](#quick-start): [evaluate one message](#evaluate-one-message), [aggregate reports](#aggregate-reports)
+- [Quick start](#quick-start): [evaluate one message](#evaluate-one-message), [aggregate reports](#aggregate-reports), [failure reports](#failure-reports)
 - [Features](#features): [choices the RFC leaves open](#choices-the-rfc-leaves-open)
 - [What the library does and what the host must do](#what-the-library-does-and-what-the-host-must-do)
 - [RFC conformance](#rfc-conformance): [the checklist](#the-rfc-checklist), [what it does not do](#what-it-does-not-do), [badges and coverage](#badges-and-coverage)
@@ -48,7 +48,7 @@ The module declares go 1.25. go-msgauth and golang.org/x/net appear in
 
 | Import path | What it holds |
 |-------------|---------------|
-| `github.com/rest-mail/go-dmarc/pkg/dmarc` | Public API. Policy: `Discover`, `Policy`, `ExistsFunc`, `Lookup`, `ParseRecord`, `Record`, `ParsePolicy`, `ErrNotDMARC` and `ErrNoPolicy`. Alignment: `AlignedMode`, `AlignmentMode` and `OrgDomain`. Reports: `AggregateRecord`, `AggregateRecords`, `BuildReport`, `NewPolicyPublished`, `Gzip`, `ReportFilename`, `ReportSubject`, `AuthorizeReportURIs`, `Namespace` and the report's XML types. DNS: `TXTResolver`. |
+| `github.com/rest-mail/go-dmarc/pkg/dmarc` | Public API. Policy: `Discover`, `Policy`, `ExistsFunc`, `Lookup`, `ParseRecord`, `Record`, `ParsePolicy`, `ErrNotDMARC` and `ErrNoPolicy`. Alignment: `AlignedMode`, `AlignmentMode` and `OrgDomain`. Reports: `AggregateRecord`, `AggregateRecords`, `BuildReport`, `NewPolicyPublished`, `Gzip`, `ReportFilename`, `ReportSubject`, `AuthorizeReportURIs`, `Namespace` and the report's XML types. Failure reports: `FailureReportsFor`, `FailureReportsDue`, `FailureReportURIs`, `ReportMailbox`, `FailureReport`, `BuildFailureReport`, `IdentityAlignment`, `SPFDNS`, `HeaderRedactor` and `RedactLocalParts`. DNS: `TXTResolver`. |
 | `pkg/dmarc/internal/dnsname` | Internal DNS-name validation, A-label normalization and punycode. |
 | `pkg/dmarc/internal/recordgrammar` | Internal tag grammar and report URI parsing. |
 | `pkg/dmarc/internal/reportcodec` | Internal RFC 9990 value normalization and attachment identifier validation. |
@@ -144,6 +144,54 @@ XML. A mechanism counts as passing DMARC only when it both passed and aligned,
 so `PolicyEvaluated` holds the DMARC result, not the raw SPF or DKIM verdict.
 `Example_aggregateReport` in the same file runs this end to end.
 
+### Failure reports
+
+RFC 9991 failure reports carry the header, and perhaps the body, of a single
+failing message, so they expose personal data; many receivers send none
+(RFC 9991 §7). If you do send them, ask the library whether the record's
+`fo=` options call for one, where it may go, and build it:
+
+```go
+due := dmarc.FailureReportsFor(discovered.Record, dkimResults, spfResult)
+if due.DMARC && rateLimiter.Allow(discovered.Domain) { // RFC 9991 §2 requires a rate limit
+	dests, err := dmarc.FailureReportURIs(discovered, nil) // no ruf=, psd=y or unconfirmed external: none
+	if err != nil {
+		log.Fatal(err)
+	}
+	for _, uri := range dests {
+		to, ok := dmarc.ReportMailbox(uri)
+		if !ok {
+			continue // a scheme you do not send to
+		}
+		report, err := dmarc.BuildFailureReport(dmarc.FailureReport{
+			From: "dmarc@reporter.example", To: to, Date: time.Now(),
+			UserAgent:             "my-mta/1.0",
+			AuthenticationResults: "reporter.example; dmarc=fail header.from=" + fromDomain,
+			ReportedDomain:        fromDomain,
+			DKIM:                  dkimResults, SPF: spfResult,
+			SourceIP:              clientIP,
+			Message:               rawMessage, // header only unless IncludeBody is set
+			RedactHeader:          dmarc.RedactLocalParts(secret),
+		})
+		if err != nil {
+			continue
+		}
+		// sign report so it passes DMARC, then send it to `to`
+	}
+}
+```
+
+The report is a complete `multipart/report` message (RFC 5965): a
+human-readable part, the `message/feedback-report` part with `Auth-Failure:
+dmarc`, `Identity-Alignment` and, for aligned failures, the `DKIM-*` or
+`SPF-DNS` fields (RFC 9991 §4, RFC 6591), and the original header as
+`text/rfc822-headers`, or the whole message as `message/rfc822` with
+`IncludeBody`. `MaxOriginalSize` caps that part: an oversized message falls
+back to its header. `RedactHeader` and `RedactBody` are the redaction hooks;
+`RedactLocalParts` replaces address local parts with stable tokens (RFC 6590).
+The DKIM and SPF reports that `fo=d` and `fo=s` ask for (RFC 6651, RFC 6652)
+are reported as due but not built.
+
 ## Features
 
 | Area | RFC | API |
@@ -153,6 +201,7 @@ so `PolicyEvaluated` holds the DMARC result, not the raw SPF or DKIM verdict.
 | Organizational Domain | RFC 9989 §4.10.2 | `OrgDomain` finds it from the DNS, not from a Public Suffix List. |
 | Identifier alignment | RFC 9989 §4.4 | `AlignedMode` compares under relaxed or strict mode (`adkim=`, `aspf=`). |
 | Aggregate reports | RFC 9990 §3 | `AggregateRecords` groups evaluations into rows; `BuildReport` writes a report that validates against RFC 9990's Appendix A schema, in its namespace, with policy-override reasons; `NewPolicyPublished` describes the discovered policy; `Gzip`, `ReportFilename` and `ReportSubject` prepare the attachment and the message (§3.5.2). |
+| Failure reports | RFC 9991; RFC 5965; RFC 6591 | `FailureReportsFor` decides from `fo=` (0, 1, d, s) which reports are due; `FailureReportURIs` gives the `ruf=` destinations allowed (none for `psd=y`); `BuildFailureReport` builds the ARF report with the DMARC fields and redaction hooks. |
 | External destinations | RFC 9990 §4 | `AuthorizeReportURIs` checks that a `rua=` or `ruf=` address outside the domain's Organizational Domain agreed to receive its reports, and applies the destination's override. |
 | Internationalized names | RFC 8616 §6 | Domains are looked up and compared as A-labels; `rua=` and `ruf=` addresses must be conventional. |
 | Injectable DNS | | Every function that queries DNS takes a `TXTResolver`, whose signature matches `net.LookupTXT`; `nil` uses it. |
@@ -241,6 +290,23 @@ The host:
   secure transport, at least once every 24 hours.
 - Calls `AuthorizeReportURIs` before sending to an external destination.
 
+### Failure reports
+
+The library:
+
+- Decides from `fo=` which failure reports a message calls for, and none when
+  the record has no `ruf=` or has `psd=y`.
+- Checks external `ruf=` destinations and reads a `mailto:` URI's address.
+- Builds the whole report message, with the header-only default and the
+  redaction hooks.
+
+The host:
+
+- Decides whether to send failure reports at all, and rate-limits them
+  (RFC 9991 §2, §8.1; `Incidents` groups similar failures).
+- Builds the DKIM and SPF reports of `fo=d` and `fo=s` if it wants them.
+- Signs the report so it passes DMARC and sends it to every allowed URI.
+
 ## RFC conformance
 
 ### The RFC checklist
@@ -315,7 +381,7 @@ reason.
 | Area | What go-dmarc does | Why |
 |------|--------------------|-----|
 | Mail and SMTP | Sends no mail and speaks no SMTP: no report delivery, no rejection during the SMTP transaction. | Delivery, retries and transport security belong to the host's mail system, which already has them. |
-| Messages | Takes domains and results, not messages: no From parsing, no SPF evaluation, no DKIM verification, no Authentication-Results field. | Those are separate standards with their own libraries; a DMARC library that parsed mail would duplicate them. |
+| Messages | Takes domains and results, not messages (a failure report only copies the original message it is given): no From parsing, no SPF evaluation, no DKIM verification, no Authentication-Results field. | Those are separate standards with their own libraries; a DMARC library that parsed mail would duplicate them. |
 | Disposition | Reports the requested and applied policy; never decides what happens to a message. | RFC 9989 makes the disposition local policy and forbids rejecting on `p=reject` alone. |
 | State | No storage of evaluations and no report scheduling. | The host already has a database and a scheduler; the library stays a set of pure functions over DNS. |
 | Public Suffix List | Not used: the Organizational Domain comes from the DNS Tree Walk. | RFC 9989 replaced the list with the Tree Walk. |
@@ -328,12 +394,6 @@ reason.
 |------|--------------------|
 | Reading reports | Writes aggregate reports but does not parse them: the Report Consumer side is out of scope. |
 | Report extensions (RFC 9990 §3.2) | Writes none. |
-
-#### Planned
-
-| Gap | Issue |
-|-----|-------|
-| Failure reports (RFC 9991): `ruf=` and `fo=` are parsed, but no report is built. | [#43](https://github.com/rest-mail/go-dmarc/issues/43) |
 
 ### Badges and coverage
 
@@ -430,3 +490,4 @@ Policy lookup and parsing, identifier alignment and aggregate report XML
 
 [RFC 9989]: https://www.rfc-editor.org/rfc/rfc9989
 [RFC 9990]: https://www.rfc-editor.org/rfc/rfc9990
+[RFC 9991]: https://www.rfc-editor.org/rfc/rfc9991
