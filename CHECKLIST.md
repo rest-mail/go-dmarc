@@ -1,10 +1,13 @@
-# RFC 9989 and RFC 9990 checklist
+# RFC 9989, RFC 9990 and RFC 9991 checklist
 
 An inventory of [RFC 9989](https://www.rfc-editor.org/rfc/rfc9989)
 requirements on a DMARC Mail Receiver (the record, policy discovery, the DNS
 Tree Walk, identifier alignment and applying the policy), and of
 [RFC 9990](https://www.rfc-editor.org/rfc/rfc9990) requirements on a report
-generator (aggregate reports and their external destinations), item by item,
+generator (aggregate reports and their external destinations), and of
+[RFC 9991](https://www.rfc-editor.org/rfc/rfc9991) requirements on a failure
+report generator (with the RFC 5965 and RFC 6591 report format it builds on),
+item by item,
 with the tests that cover it. The list tracks MUST, MUST NOT, SHOULD, SHOULD NOT,
 RECOMMENDED and REQUIRED obligations on receivers and reporters, the MAYs the
 library implements, and the normative behaviour that carries no keyword (level
@@ -25,7 +28,7 @@ In May 2026 RFC 7489 was obsoleted by DMARCbis:
 [RFC 9990](https://www.rfc-editor.org/rfc/rfc9990) (aggregate reports) and
 [RFC 9991](https://www.rfc-editor.org/rfc/rfc9991) (failure reports). The
 receiver side follows RFC 9989, and aggregate reports and the check of their
-external destinations follow RFC 9990. Failure reports are not generated.
+external destinations follow RFC 9990, and failure reports follow RFC 9991.
 What changed:
 
 | Area | RFC 7489 (before) | RFC 9989 (now) |
@@ -44,8 +47,9 @@ What changed:
 
 Reviewed RFC 9989 §§1–11 and Appendices A–C, including their subsections,
 for Mail Receiver obligations. This records the audit scope, not a claim that
-caller-owned behavior is implemented by the library. Failure reports remain
-unsupported by owner decision; this audit adds no such feature.
+caller-owned behavior is implemented by the library. Failure reports were
+unsupported at the time; RFC 9991 failure reports were added later (#43) and
+have their own rows below.
 
 | Sections audited | Result |
 |------------------|--------|
@@ -113,7 +117,7 @@ records. Custom `TXTResolver` implementations must preserve that contract.
 | DMARC-URI-06 | 4.7 | MUST | Implement mailto: report URIs, i.e. sending reports by mail. | n/a: the library sends no mail. It parses mailto: URIs and finds their host for §7.1 (DMARC-EXT-01); the caller sends. |
 | DMARC-URI-07 | 4.7 | MUST | Ignore report URIs the receiver does not support. | n/a: the caller knows which schemes it sends to; the library keeps every valid URI. |
 | DMARC-URI-08 | 4.7 | MUST NOT | Generate aggregate reports for a domain whose record has no rua=. | `TestNoRUANoAggregateDestinations` |
-| DMARC-URI-09 | 4.7 | MUST NOT | Generate failure reports for a domain whose record has no ruf=. | n/a: the library generates no failure reports. |
+| DMARC-URI-09 | 4.7 | MUST NOT | Generate failure reports for a domain whose record has no ruf=. | `TestFailureReportsFor` |
 
 ## Policy discovery and the DNS Tree Walk (§4.10, §4.10.1, §5.3)
 
@@ -226,7 +230,18 @@ records. Custom `TXTResolver` implementations must preserve that contract.
 
 | ID | Section | Level | Requirement | Tests |
 |----|---------|-------|-------------|-------|
-| DMARC-FAIL-01 | 5.3.9; RFC 9991 | MAY | Send per-message failure reports. | n/a: failure reports are not supported yet; the library builds aggregate reports only. |
+| DMARC-FAIL-01 | 5.3.9; RFC 9991 | MAY | Send per-message failure reports: BuildFailureReport builds one; sending it is the caller's. | `TestBuildFailureReport` |
+| DMARC-FAIL-02 | 4.7 | Normative | fo= decides the reports due: 0 a DMARC report when no mechanism gave an aligned pass, 1 when any did not, d a DKIM report for a failed signature, s an SPF report for a failed SPF check. | `TestFailureReportsFor` |
+| DMARC-FAIL-03 | RFC 9991 2 | MUST NOT | Consider the ruf= tag of a record with psd=y. | `TestFailureReportsFor`, `TestFailureReportURIs` |
+| DMARC-FAIL-04 | RFC 9991 2, 5 | MUST | Verify external ruf= destinations with RFC 9990 §4, ruf in place of rua; the obsolete "!" size limit is ignored (RFC 9989 §4.8). | `TestFailureReportURIs`, `TestReportMailbox` |
+| DMARC-FAIL-05 | RFC 9991 4 | REQUIRED | Identity-Alignment lists the mechanisms that failed to authenticate an aligned identity, or says none. | `TestIdentityAlignment`, `TestBuildFailureReport` |
+| DMARC-FAIL-06 | RFC 9991 4; RFC 6591 3.2.3, 3.2.6, 4 | REQUIRED | DKIM-Domain, DKIM-Identity and DKIM-Selector for a DKIM failure of an aligned identifier; one SPF-DNS per SPF record for an SPF failure of an aligned identifier. | `TestBuildFailureReport`, `TestBuildFailureReportFields` |
+| DMARC-FAIL-07 | RFC 9991 4; RFC 5965 3.1, 3.2; RFC 6591 3.1, 3.2.1 | MUST | The feedback part has Feedback-Type auth-failure, User-Agent, Version 1, Auth-Failure dmarc and one Authentication-Results exactly once, Reported-Domain, single-appearance fields at most once, in 7-bit ASCII. | `TestBuildFailureReport`, `TestBuildFailureReportFields`, `TestBuildFailureReportErrors` |
+| DMARC-FAIL-08 | RFC 5965 2; RFC 6591 3.1 | MUST | The report is multipart/report (report-type feedback-report): a human-readable part, the message/feedback-report part, and the original message (message/rfc822) or its header block (text/rfc822-headers); its Subject is the original's. | `TestBuildFailureReport`, `TestBuildFailureReportOriginal` |
+| DMARC-FAIL-09 | RFC 9991 7, 7.3; RFC 6591 3.1 | MAY | Redact the reported message, as RFC 6590 describes: the header alone by default, hooks for header fields and the body, and stable local-part tokens. | `TestBuildFailureReportOriginal` |
+| DMARC-FAIL-10 | RFC 9991 2 | MUST | Rate-limit outgoing failure reports. | n/a: the library sends nothing; the caller rate-limits (and may group reports with Incidents, §8.1). |
+| DMARC-FAIL-11 | RFC 9991 2 | MUST | Attempt delivery to each ruf= URI. | n/a: the caller sends; FailureReportURIs returns every authorized URI. |
+| DMARC-FAIL-12 | RFC 9991 5.1 | SHOULD | Send failure reports in DMARC-aligned mail. | n/a: the caller signs and sends the report. |
 
 ## Internationalized mail (RFC 8616 §6)
 
